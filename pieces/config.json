@@ -1,0 +1,13 @@
+{
+  "id": "default",
+  "name": "大头主题",
+  "description": "大头斗兽棋主题风格",
+  "author": "BigHead",
+  "board": {
+    "horizontalPadding": 0.0278,
+    "verticalPadding": 0.02,
+    "gap": 0.01,
+    "allowFlip": true,
+    "currentPlayerGlowSize": 1.4
+  }
+} 

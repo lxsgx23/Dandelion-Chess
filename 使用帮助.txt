@@ -1,0 +1,13 @@
+双击Dandelion_Chess_Animal.exe运行GUI，点击走子（界面本身无棋规检测）。
+
+按A开启、关闭分析，有时会卡住，多按几下就好了：P
+
+文件说明：
+权重文件：latest.bin.gz
+设置文件：engine2024.cfg
+引擎本体：katago.exe
+图片素材可自己在board.jpg和pieces文件夹中修改。
+
+后续会继续完善界面，添加更多功能。
+
+2025/02/14
