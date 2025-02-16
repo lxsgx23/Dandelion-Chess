@@ -1,5 +1,11 @@
+界面：Dandelion v2.1
+源码：https://github.com/lxsgx23/Dandelion-Chess
+作者：
+Laoxu(Kouza)      QQ:3527355284  github.com/lxsgx23
+Sigmoid(hzyhhzy)  QQ:2658628026  github.com/hzyhhzy   
 
-##########     AUTHOR     ##########
 
-Sigmoid
-Laoxu(Kouza)
+引擎：KataGo修改版
+源码：https://github.com/hzyhhzy/KataGomo/tree/AnimalChess2025
+作者：
+Sigmoid(hzyhhzy)

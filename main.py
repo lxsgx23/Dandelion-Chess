@@ -17,7 +17,9 @@ ROWS, COLS = 9, 7
 TILE_SIZE = 100
 ANALYSIS_PANEL_WIDTH = 500
 WIDTH, HEIGHT = COLS * TILE_SIZE + ANALYSIS_PANEL_WIDTH, ROWS * TILE_SIZE
-KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine2024.cfg -model ./latest.bin.gz"
+#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine2024.cfg -model ./b10c192nbt.bin.gz"
+KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine2024_cpu.cfg -model ./b10c192nbt.bin.gz"
+
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
 # GTP控制台常量
 GTP_CONSOLE_HEIGHT = 300
@@ -172,7 +174,7 @@ class XiangQi:
         pygame.display.set_caption("K-Dandelion 2.1 KataGo 斗兽棋")
         
         # 加载资源
-        self.board_img = pygame.image.load("board.jpg").convert()
+        self.board_img = pygame.image.load("pieces/board.jpg").convert()
         self.board_img = pygame.transform.scale(self.board_img, (COLS*TILE_SIZE, HEIGHT))
         
         self.piece_images = {}
