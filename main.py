@@ -17,7 +17,7 @@ ROWS, COLS = 9, 7
 TILE_SIZE = 100
 ANALYSIS_PANEL_WIDTH = 500
 WIDTH, HEIGHT = COLS * TILE_SIZE + ANALYSIS_PANEL_WIDTH, ROWS * TILE_SIZE
-#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine2024.cfg -model ./b10c192nbt.bin.gz"
+#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine2024.cfg -model ./b10c384nbt.bin.gz"
 KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine2024_cpu.cfg -model ./b10c192nbt.bin.gz"
 
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
@@ -164,6 +164,74 @@ def maybe_first_start():
 
 
 class XiangQi:
+    # 在XiangQi类中添加以下方法：
+
+    def prompt_for_fen(self):
+        """弹出对话框让用户输入FEN字符串"""
+        try:
+            import tkinter as tk
+            from tkinter import simpledialog
+            root = tk.Tk()
+            root.withdraw()  # 隐藏主窗口
+            fen = simpledialog.askstring("设置局面", "请输入FEN字符串（格式：棋盘部分 当前玩家）:")
+            root.destroy()
+            if fen:
+                self.apply_fen(fen)
+        except Exception as e:
+            self.show_error(f"无法创建输入框：{str(e)}")
+
+    def apply_fen(self, fen_str):
+        """应用用户输入的FEN字符串"""
+        try:
+            # 分割FEN组成部分
+            parts = fen_str.strip().split()
+            if len(parts) < 1:
+                raise ValueError("FEN不能为空")
+        
+            # 解析棋盘部分
+            board_part = parts[0]
+            rows = board_part.split('/')
+            if len(rows) != ROWS:
+                raise ValueError(f"需要{ROWS}行，实际{len(rows)}行")
+        
+            new_board = []
+            for row in rows:
+                new_row = []
+                for char in row:
+                    if char.isdigit():
+                        new_row.extend([' '] * int(char))
+                    else:
+                        if char not in PIECES:
+                            raise ValueError(f"无效棋子字符: {char}")
+                        new_row.append(char)
+                if len(new_row) != COLS:
+                    raise ValueError(f"行'{row}'列数错误，应有{COLS}列")
+                new_board.append(new_row)
+        
+            # 解析当前玩家（默认w）
+            current_player = 'w'
+            if len(parts) >= 2:
+                current_player = parts[1].lower()
+                if current_player not in ('w', 'b'):
+                    raise ValueError("当前玩家应为w或b")
+
+        # 更新游戏状态
+            with self.analysis_lock:
+                self.board = new_board
+                self.current_player = current_player
+                self.selected_piece = None
+                self.last_move = None
+                self.current_movenum = 0
+            
+            # 同步到KataGo
+                self.sync_board_assume_locked()
+                self.try_send_command(f"setfen {self.get_fen()}", enable_lock=False)
+                if self.analyzing:
+                    self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
+            
+        except Exception as e:
+            self.show_error(f"FEN应用失败: {str(e)}")
+    
     def __init__(self):
         self.last_analysis_time = 0  # 记录最后分析时间
         self.analysis_refresh_interval = 0.1  # 刷新间隔（秒）
@@ -920,7 +988,8 @@ class XiangQi:
                         self.set_movelimit(self.movenum_limit+8)
                     elif event.key == pygame.K_DOWN:
                         self.set_movelimit(self.movenum_limit-8)
-              
+                    elif event.key == pygame.K_9:
+                        self.prompt_for_fen()  
             self.draw_board()
             pygame.display.update()
             #pygame.display.flip()
