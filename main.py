@@ -7,6 +7,8 @@ import re
 import time
 import math
 import glob
+import sys
+import pyperclip
 
 FONT_NAME="simhei"
 GTP_COMMAND_ANALYZE="kata-analyze interval 20"
@@ -17,8 +19,8 @@ ROWS, COLS = 9, 7
 TILE_SIZE = 100
 ANALYSIS_PANEL_WIDTH = 500
 WIDTH, HEIGHT = COLS * TILE_SIZE + ANALYSIS_PANEL_WIDTH, ROWS * TILE_SIZE
-#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine2024.cfg -model ./b10c384nbt.bin.gz"
-KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine2024_cpu.cfg -model ./b10c192nbt.bin.gz"
+#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine/engine2024.cfg -model ./engine/b10c384nbt.bin.gz"
+KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine/engine2024_cpu.cfg -model ./engine/b10c192nbt.bin.gz"
 
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
 # GTP控制台常量
@@ -239,7 +241,7 @@ class XiangQi:
         #self.engine_ready = False  # 引擎是否已经在stderr里返回“GTP ready”
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("K-Dandelion 2.1 KataGo 斗兽棋")
+        pygame.display.set_caption("Dandelion 斗兽棋")
         
         # 加载资源
         self.board_img = pygame.image.load("pieces/board.jpg").convert()
