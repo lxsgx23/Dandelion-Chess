@@ -19,8 +19,8 @@ ROWS, COLS = 9, 7
 TILE_SIZE = 100
 ANALYSIS_PANEL_WIDTH = 500
 WIDTH, HEIGHT = COLS * TILE_SIZE + ANALYSIS_PANEL_WIDTH, ROWS * TILE_SIZE
-#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine/engine2024.cfg -model ./engine/b10c384nbt.bin.gz"
-KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine/engine2024_cpu.cfg -model ./engine/b10c192nbt.bin.gz"
+#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine/engine2024.cfg -model ./engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
+KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine/engine2024_cpu.cfg -model ./engine/b10c192nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
 
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
 # GTP控制台常量
@@ -235,6 +235,7 @@ class XiangQi:
             self.show_error(f"FEN应用失败: {str(e)}")
     
     def __init__(self):
+        
         self.last_analysis_time = 0  # 记录最后分析时间
         self.analysis_refresh_interval = 0.1  # 刷新间隔（秒）
         self.last_refresh_time = 0  # 记录最后刷新棋盘时间
@@ -287,13 +288,12 @@ class XiangQi:
         #kata-set-rule scoring 2   狮虎能跳过己方老鼠，河里和陆上的老鼠不能互吃
         #kata-set-rule scoring 3   狮虎能跳过己方老鼠，河里和陆上的老鼠能互吃
         self.game_rule = 0
-        
         # 初始化引擎
         self.start_katago()
         self.set_movelimit(300)
         self.set_aggressive_mode(0)
         self.set_game_rule(0)
-
+        self.set_game_drawrule("WEIGHT")  # 修改初始化为"WEIGHT"
     def start_katago(self):
         """启动KataGo进程"""
         try:
@@ -395,6 +395,14 @@ class XiangQi:
             self.sync_board_assume_locked()
             self.game_rule=rule
             self.try_send_command(f"kata-set-rule scoring {rule}", enable_lock=False)
+            if self.analyzing:
+                self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
+
+    def set_game_drawrule(self, rule):
+        with self.analysis_lock:
+            self.sync_board_assume_locked()
+            self.game_drawrule = rule
+            self.try_send_command(f"kata-set-rule drawjudge {rule}", enable_lock=False)
             if self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
@@ -992,6 +1000,12 @@ class XiangQi:
                         self.set_movelimit(self.movenum_limit-8)
                     elif event.key == pygame.K_9:
                         self.prompt_for_fen()  
+                    elif event.key == pygame.K_i:
+                        self.set_game_drawrule("DRAW")
+                    elif event.key == pygame.K_o:
+                        self.set_game_drawrule("COUNT")
+                    elif event.key == pygame.K_p:
+                        self.set_game_drawrule("WEIGHT")
             self.draw_board()
             pygame.display.update()
             #pygame.display.flip()
