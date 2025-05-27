@@ -19,8 +19,8 @@ ROWS, COLS = 9, 7
 TILE_SIZE = 100
 ANALYSIS_PANEL_WIDTH = 500
 WIDTH, HEIGHT = COLS * TILE_SIZE + ANALYSIS_PANEL_WIDTH, ROWS * TILE_SIZE
-#KATAGO_COMMAND = "./engine/katago.exe gtp -config ./engine/engine2024.cfg -model ./engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
-KATAGO_COMMAND = "./engine/katago_eigen.exe gtp -config ./engine/engine2024_cpu.cfg -model ./engine/b10c192nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
+#KATAGO_COMMAND = "./resource/engine/katago.exe gtp -config ./resource/engine/engine2024.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
+KATAGO_COMMAND = "./resource/engine/katago_eigen.exe gtp -config ./resource/engine/engine2024_cpu.cfg -model ./resource/engine/b10c192nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
 
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
 # GTP控制台常量
@@ -146,7 +146,7 @@ def draw_arrow2(screen, start_pos, end_pos, line_width, out_width, arrow_size, c
 def maybe_first_start():
     
     # 目标目录
-    directory = r"./engine/KataGoData/opencltuning"
+    directory = r"./resource/engine/KataGoData/opencltuning"
     """
     判断指定目录下是否存在非空的 .txt 文件
     :param directory: 目录路径
@@ -245,12 +245,12 @@ class XiangQi:
         pygame.display.set_caption("Dandelion 斗兽棋")
         
         # 加载资源
-        self.board_img = pygame.image.load("pieces/board.jpg").convert()
+        self.board_img = pygame.image.load("resource/pieces/board.jpg").convert()
         self.board_img = pygame.transform.scale(self.board_img, (COLS*TILE_SIZE, HEIGHT))
         
         self.piece_images = {}
         for key, name in PIECES.items():
-            img = pygame.image.load(f"pieces/{name}.png").convert_alpha()
+            img = pygame.image.load(f"resource/pieces/{name}.png").convert_alpha()
             self.piece_images[key] = pygame.transform.scale(img, (TILE_SIZE-10, TILE_SIZE-10))
 
         # 初始化游戏状态
@@ -304,6 +304,9 @@ class XiangQi:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                text=True,  # 启用文本模式
+                encoding='utf-8',  # 指定编码为UTF-8
+                errors='replace',  # 替换无法解码的字符
                 universal_newlines=True,
                 bufsize=1
             )

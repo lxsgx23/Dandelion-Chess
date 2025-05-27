@@ -29,19 +29,19 @@ class BoardEditor:
         pygame.display.set_caption("棋盘编辑器")
         
         # 加载资源
-        self.board_img = pygame.image.load("pieces/board.jpg").convert()
+        self.board_img = pygame.image.load("resource/pieces/board.jpg").convert()
         self.board_img = pygame.transform.scale(self.board_img, (COLS*TILE_SIZE, HEIGHT))
         
         # 加载赞赏图片（如果存在）
         try:
-            self.donate_img = pygame.image.load("pieces/donate.jpg").convert_alpha()
+            self.donate_img = pygame.image.load("resource/pieces/donate.jpg").convert_alpha()
             self.donate_img = pygame.transform.scale(self.donate_img, (180, 180))
         except FileNotFoundError:
             self.donate_img = None
 
         self.piece_images = {}
         for key, name in PIECES.items():
-            img = pygame.image.load(f"pieces/{name}.png").convert_alpha()
+            img = pygame.image.load(f"resource/pieces/{name}.png").convert_alpha()
             self.piece_images[key] = pygame.transform.scale(img, (TILE_SIZE-10, TILE_SIZE-10))
 
         # 初始化游戏状态
