@@ -15,6 +15,8 @@ SIDEBAR_WIDTH = 400
 WIDTH = ANNOUNCE_WIDTH + COLS * TILE_SIZE + SIDEBAR_WIDTH
 HEIGHT = ROWS * TILE_SIZE
 
+#w是蓝，b是红
+
 PIECES = {
     'r': 'ratr', 'c': 'catr', 'd': 'dogr', 'w': 'wolfr',
     'j': 'leopardr', 't': 'tigerr', 'l': 'lionr', 'e': 'elephantr',
@@ -147,8 +149,8 @@ class BoardEditor:
             pygame.draw.rect(self.screen, (0, 0, 200), (x-5, y-5, 90, 90), 2)
 
     def draw_current_player(self):
-        text = "当前走棋方: 红方" if self.current_player == 'w' else "当前走棋方: 蓝方"
-        color = (200, 0, 0) if self.current_player == 'w' else (0, 0, 200)
+        text = "当前走棋方: 蓝方" if self.current_player == 'w' else "当前走棋方: 红方"
+        color = (0, 0, 200) if self.current_player == 'w' else (200, 0, 0)
         sidebar_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
         self.draw_text(text, (sidebar_x + 10, 10), color=color, font_size=24)
 
