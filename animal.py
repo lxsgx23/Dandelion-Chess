@@ -19,8 +19,8 @@ ROWS, COLS = 9, 7
 TILE_SIZE = 100
 ANALYSIS_PANEL_WIDTH = 500
 WIDTH, HEIGHT = COLS * TILE_SIZE + ANALYSIS_PANEL_WIDTH, ROWS * TILE_SIZE
-#KATAGO_COMMAND = "./resource/engine/katago.exe gtp -config ./resource/engine/engine2024.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
-KATAGO_COMMAND = "./resource/engine/katago_eigen.exe gtp -config ./resource/engine/engine2024_cpu.cfg -model ./resource/engine/b10c192nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
+KATAGO_COMMAND = "./resource/engine/katago.exe gtp -config ./resource/engine/engine2024.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
+#KATAGO_COMMAND = "./resource/engine/katago_eigen.exe gtp -config ./resource/engine/engine2024_cpu.cfg -model ./resource/engine/b10c192nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
 
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
 # GTP控制台常量
@@ -32,8 +32,6 @@ SCROLL_SPEED = 3
 # 提示栏常量
 INFORMATION_PANEL_POS = 300
 INFORMATION_PANEL_HEIGHT = 250
-
-
 
 PIECES = {
     'r': 'ratr', 'c': 'catr', 'd': 'dogr', 'w': 'wolfr',
@@ -69,7 +67,6 @@ def draw_arrow(arrow_surface, start_pos, end_pos, line_width, arrow_size, color=
     :param line_width: 箭头线的宽度（默认 10）
     :param arrow_size: 箭头头部的大小（默认 20）
     """
-    
     # 计算箭头的方向
     dx, dy = end_pos[0] - start_pos[0], end_pos[1] - start_pos[1]
     if(dx*dx<5 and dy*dy<5):
@@ -84,10 +81,10 @@ def draw_arrow(arrow_surface, start_pos, end_pos, line_width, arrow_size, color=
     end_pos=(int(end_pos[0]),int(end_pos[1]))
     end_pos2=(int(end_pos2[0]),int(end_pos2[1]))
     line_width=int(line_width)
-    # 创建一个半透明的 Surface
+
+     # 创建一个半透明的 Surface
     #arrow_surface = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
     #arrow_surface.fill((0, 0, 0, 0))  # 透明背景
-
 
     # 绘制箭头线
     pygame.draw.line(
@@ -109,9 +106,6 @@ def draw_arrow(arrow_surface, start_pos, end_pos, line_width, arrow_size, color=
 
     # 绘制箭头头部
     pygame.draw.polygon(arrow_surface, color, arrow_points)
-
-    # 将半透明 Surface 绘制到屏幕上
-    #screen.blit(arrow_surface, (0, 0))
 
 def draw_arrow2(screen, start_pos, end_pos, line_width, out_width, arrow_size, color=(128, 128, 128, 64), color_out=(255, 0, 0, 128)):
     """
@@ -144,14 +138,8 @@ def draw_arrow2(screen, start_pos, end_pos, line_width, out_width, arrow_size, c
     screen.blit(arrow_surface, (0, 0))
 
 def maybe_first_start():
-    
     # 目标目录
     directory = r"./resource/engine/KataGoData/opencltuning"
-    """
-    判断指定目录下是否存在非空的 .txt 文件
-    :param directory: 目录路径
-    :return: 如果存在非空的 .txt 文件，返回 True；否则返回 False
-    """
     # 获取目录下所有 .txt 文件的路径
     txt_files = glob.glob(os.path.join(directory, "*.txt"))
 
@@ -163,10 +151,26 @@ def maybe_first_start():
 
     return True  # 没有非空的 .txt 文件
 
-
-
 class XiangQi:
-    # 在XiangQi类中添加以下方法：
+    # 在类开头添加需要被其他方法调用的方法定义
+    def try_send_command(self, cmds, enable_lock=True):
+        cmds = cmds.split("\n")
+        for cmd in cmds:
+            try:
+                self.katago_process.stdin.write(cmd + "\n")
+                self.katago_process.stdin.flush()
+                if enable_lock:
+                    with self.analysis_lock:
+                        self.gtp_log.append(('sent', cmd.strip()))
+                else:
+                    self.gtp_log.append(('sent', cmd.strip()))
+            except Exception as e:
+                self.show_error_dialog = True
+                self.error_message = f"Instruction sending failed: {str(e)}"
+    
+    def show_error(self, message):
+        self.show_error_dialog = True
+        self.error_message = message
 
     def prompt_for_fen(self):
         """弹出对话框让用户输入FEN字符串"""
@@ -235,10 +239,9 @@ class XiangQi:
             self.show_error(f"FEN应用失败: {str(e)}")
     
     def __init__(self):
-        
-        self.last_analysis_time = 0  # 记录最后分析时间
-        self.analysis_refresh_interval = 0.1  # 刷新间隔（秒）
-        self.last_refresh_time = 0  # 记录最后刷新棋盘时间
+        self.last_analysis_time = 0    # 记录最后分析时间
+        self.analysis_refresh_interval = 0.1    # 刷新间隔（秒）
+        self.last_refresh_time = 0   # 记录最后刷新棋盘时间
         #self.engine_ready = False  # 引擎是否已经在stderr里返回“GTP ready”
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -268,32 +271,34 @@ class XiangQi:
         
         self.selected_piece = None
         self.current_player = 'w'
-        self.last_move = None  # 存储最后一步移动信息
+        self.last_move = None   # 存储最后一步移动信息
 
         # 分析系统
         self.analyzing = True
         self.analysis_results = []
         self.analysis_lock = threading.Lock()
-        self.gtp_log = []  # GTP日志存储
-        self.scroll_offset = 0  # 滚动条位置
+        self.gtp_log = []    # GTP日志存储
+        self.scroll_offset = 0   # 滚动条位置
         self.show_error_dialog = False
         self.error_message = ""
-        self.aggressive_mode = 0 #激进模式，0平衡，1黑激进，-1白激进
-        self.current_movenum = 0 #目前多少步了
-        self.movenum_limit = 300 #步数限制(mm)
-
+        self.aggressive_mode = 0   #激进模式，0平衡，1黑激进，-1白激进
+        self.current_movenum = 0    #目前多少步了
+        self.movenum_limit = 300    #步数限制(mm)
         
         #kata-set-rule scoring 0   狮虎不能跳过己方老鼠，河里和陆上的老鼠不能互吃
         #kata-set-rule scoring 1   狮虎不能跳过己方老鼠，河里和陆上的老鼠能互吃
         #kata-set-rule scoring 2   狮虎能跳过己方老鼠，河里和陆上的老鼠不能互吃
         #kata-set-rule scoring 3   狮虎能跳过己方老鼠，河里和陆上的老鼠能互吃
+        
         self.game_rule = 0
+        
         # 初始化引擎
         self.start_katago()
         self.set_movelimit(300)
         self.set_aggressive_mode(0)
         self.set_game_rule(0)
-        self.set_game_drawrule("WEIGHT")  # 修改初始化为"WEIGHT"
+        self.set_game_drawrule("WEIGHT")    # 修改初始化为"WEIGHT"
+    
     def start_katago(self):
         """启动KataGo进程"""
         try:
@@ -304,23 +309,21 @@ class XiangQi:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,  # 启用文本模式
-                encoding='utf-8',  # 指定编码为UTF-8
-                errors='replace',  # 替换无法解码的字符
+                text=True,
+                encoding='utf-8',
+                errors='replace',
                 universal_newlines=True,
                 bufsize=1
             )
             threading.Thread(target=self.read_output, daemon=True).start()
-            threading.Thread(target=self.read_stderr, daemon=True).start() #stderr的消息没用，但是积攒过多会堵塞stdin和stdout
+            threading.Thread(target=self.read_stderr, daemon=True).start()
             self.try_send_command(INITIAL_COMMANDS)
             if self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE)
         except Exception as e:
             self.show_error(f"Failed to load Katago: {str(e)}")
-            
-
+    
     def restart_game(self):
-        # 初始化游戏状态
         self.board = [
             ['l', ' ', ' ', ' ', ' ', ' ', 't'],
             [' ', 'd', ' ', ' ', ' ', 'c', ' '],
@@ -335,14 +338,12 @@ class XiangQi:
         
         self.selected_piece = None
         self.current_player = 'w'
-        self.last_move = None  # 存储最后一步移动信息
-
+        self.last_move = None    # 存储最后一步移动信息
         self.analysis_results = []
-        self.current_movenum = 0 #目前多少步了
+        self.current_movenum = 0    #目前多少步了
         self.try_send_command("clear_board")
         self.set_movelimit(300)
         #self.set_aggressive_mode(0)
-
 
     def sync_board_assume_locked(self, undo_once=False):
         self.current_movenum = 0
@@ -354,7 +355,7 @@ class XiangQi:
         self.current_player = next_player_should_be
 
         fen=self.get_fen(has_pla=False)
-        fen=f"{fen} {next_player_should_be}" #katago的fen的黑白是反的。但界面也是反的
+        fen=f"{fen} {next_player_should_be}"    #katago的fen的黑白是反的。但界面也是反的
         self.try_send_command("setfen "+fen, enable_lock=False)
         
     def swap_side(self):
@@ -409,7 +410,7 @@ class XiangQi:
             if self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
-    def read_stderr(self): #stderr的消息没用，但是积攒过多会堵塞stdin和stdout
+    def read_stderr(self):
         while True:
             line = self.katago_process.stderr.readline()
             if not line:
@@ -426,18 +427,14 @@ class XiangQi:
 
 
     def read_output(self):
-        """输出读取，处理分析数据和日志"""
-
         while True:
             line = self.katago_process.stdout.readline()
             if not line:
                 break
             
             line = line.strip()
-            # 处理分析数据
             if line.startswith("info"):
                 self.handle_analysis_line(line)
-            # 记录所有GTP输出
             else:
                 with self.analysis_lock:
                     if("illegal" in line):
@@ -450,12 +447,8 @@ class XiangQi:
                     if len(self.gtp_log) > 100:
                         self.gtp_log.pop(0)
 
-        
-
     def handle_analysis_line(self, line):
-        """改进的分析数据处理"""
         if "info" in line and "visits" in line and "winrate" in line:
-            # 使用更精确的正则表达式匹配所有候选着法
             pattern = re.compile(
                 r'info move (\w+)'
                 r'.*?visits (\d+)'
@@ -463,30 +456,25 @@ class XiangQi:
                 r'.*?scoreMean ([-\d.]+(?:[eE][-+]?\d+)?)'
                 r'.*?lcb ([-\d.]+(?:[eE][-+]?\d+)?)'
                 r'.*?order (\d+)'
-                r'.*?pv ([\w\s]+?)(?=\s*info|$)',  # 识别到info则截止
+                r'.*?pv ([\w\s]+?)(?=\s*info|$)',
                 re.DOTALL
             )
             with self.analysis_lock:
-                # 清空旧数据开始新分析周期
                 if time.time() - self.last_analysis_time >= self.analysis_refresh_interval:
                     self.analysis_results.clear()
                     self.last_analysis_time = time.time()
                 
-                #print(line)
-                # 提取所有候选着法
                 for match in pattern.finditer(line):
                     move = match.group(1)
                     visits = int(match.group(2))
                     winrate = float(match.group(3)) * 100
-                    drawrate = float(match.group(4)) #scoreMean
+                    drawrate = float(match.group(4))
                     lcb = float(match.group(5))
                     order = int(match.group(6))
                     pv = match.group(7)
-                    #print(match)
                     col, row=movestr_to_pos(move)
                     if col is not None:
                         try:
-                            # 更新或添加结果
                             exists = next((x for x in self.analysis_results if x['move'] == move), None)
                             if exists:
                                 exists.update({
@@ -513,15 +501,12 @@ class XiangQi:
                                     'pv': pv
                                 })
                         except ValueError:
-                            continue  # 跳过无效坐标
+                            continue
                 
-                # 按计算量降序排序
-                #print(len(self.analysis_results))
                 self.analysis_results.sort(key=lambda x: (-x['visits'], -x['winrate']))
 
     def draw_board(self):
         """棋盘绘制"""
-        
         self.screen.blit(self.board_img, (0, 0))
         # 绘制最后一步移动指示
         if self.last_move:
@@ -552,6 +537,7 @@ class XiangQi:
                         row * TILE_SIZE + TILE_SIZE//2
                     ))
                     self.screen.blit(img, rect)
+                    
         with self.analysis_lock:
             # 绘制所有候选着法
             if(self.analysis_results is not None and len(self.analysis_results)>=1):
@@ -567,15 +553,14 @@ class XiangQi:
                     alpha_surface = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
                     c = float(v)/maxVisit
                     spot_alpha=255 if is_best_move else 255*(0.4*c+0.3)
-                    spot_color = (255*(1-c),255*(0.5+0.5*c),255*c,spot_alpha)# 根据计算量调整颜色
+                    spot_color = (255*(1-c),255*(0.5+0.5*c),255*c,spot_alpha)
                     
                     text_bg_color=(spot_color[0],spot_color[1],spot_color[2],100)
                     #text_color=(255-text_bg_color[0],255-text_bg_color[1],255-text_bg_color[2],255)
                     text_color=(0,0,0,255)
 
-
                     if(is_best_move):
-                        pygame.draw.circle(  #外面一圈红
+                        pygame.draw.circle(
                             alpha_surface, 
                             (255,0,0,255),  
                             (TILE_SIZE//2, TILE_SIZE//2),
@@ -587,9 +572,6 @@ class XiangQi:
                             (TILE_SIZE//2, TILE_SIZE//2),
                             TILE_SIZE*0.45
                         )
-
-
-
                     else:
                         pygame.draw.circle(
                             alpha_surface, 
@@ -635,7 +617,6 @@ class XiangQi:
                     )
                     
                     if is_best_move:
-                        #箭头
                         col1=None
                         row1=None
                         col2=None
@@ -643,8 +624,8 @@ class XiangQi:
                         if(self.selected_piece is None):
                             col1=col
                             row1=row
-                            pvs = result['pv'].split()  # 按空格分割字符串
-                            if len(pvs) > 1:  # 如果坐标数量大于 1
+                            pvs = result['pv'].split()
+                            if len(pvs) > 1:
                                 col2,row2=movestr_to_pos(pvs[1])
                         else:
                             row1,col1=self.selected_piece
@@ -664,13 +645,35 @@ class XiangQi:
                                 draw_arrow2(self.screen,(x1,y1),(x2,y2),TILE_SIZE*0.15,TILE_SIZE*0.03,TILE_SIZE*0.3)
 
         self.draw_analysis_panel()
-        
-        # 绘制GTP控制台
         self.draw_gtp_console()
         self.draw_information_panel()
-        # 绘制错误对话框
+        
         if self.show_error_dialog:
             self.draw_error_dialog()
+            
+    def draw_error_dialog(self):
+        """绘制错误对话框"""
+        dialog_width, dialog_height = 400, 150
+        dialog_x = (WIDTH - dialog_width) // 2
+        dialog_y = (HEIGHT - dialog_height) // 2
+        
+        # 绘制对话框背景
+        pygame.draw.rect(self.screen, (200, 200, 200), (dialog_x, dialog_y, dialog_width, dialog_height))
+        pygame.draw.rect(self.screen, (100, 100, 100), (dialog_x, dialog_y, dialog_width, dialog_height), 2)
+        
+        # 绘制错误信息
+        font = pygame.font.SysFont(FONT_NAME, 20)
+        error_text = font.render(self.error_message, True, (0, 0, 0))
+        self.screen.blit(error_text, (dialog_x + 20, dialog_y + 30))
+        
+        # 绘制确定按钮
+        button_rect = pygame.Rect(dialog_x + 150, dialog_y + 90, 100, 40)
+        pygame.draw.rect(self.screen, (150, 150, 150), button_rect)
+        pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
+        
+        button_font = pygame.font.SysFont(FONT_NAME, 18)
+        button_text = button_font.render("确定", True, (0, 0, 0))
+        self.screen.blit(button_text, (button_rect.centerx - 20, button_rect.centery - 10))
 
     def draw_analysis_panel(self):
         """分析信息面板"""
@@ -691,6 +694,111 @@ class XiangQi:
                 text_surf = font.render(text_line, True, color)
                 self.screen.blit(text_surf, (panel_x + 10, y))
                 y += 30
+            
+        # 添加形势判断区域
+        situation_y = HEIGHT - GTP_CONSOLE_HEIGHT - 80  # 在GTP控制台上方留出空间
+        pygame.draw.rect(self.screen, (220, 220, 220), 
+                        (panel_x, situation_y, ANALYSIS_PANEL_WIDTH, 80))
+        
+        # 获取当前形势判断文本和分数
+        situation_text, text_color, score_text, score_color = self.get_situation_text()
+        
+        # 绘制分数（左侧固定位置）
+        font = pygame.font.SysFont(FONT_NAME, 32, bold=False)
+        score_surf = font.render(score_text, True, score_color)
+        score_rect = score_surf.get_rect(center=(panel_x + 50, situation_y + 40))
+        self.screen.blit(score_surf, score_rect)
+        
+        # 绘制形势判断文本
+        font = pygame.font.SysFont(FONT_NAME, 24, bold=True)
+        text_surf = font.render(situation_text, True, text_color)
+        text_rect = text_surf.get_rect(center=(panel_x + ANALYSIS_PANEL_WIDTH//2, situation_y + 40))
+        self.screen.blit(text_surf, text_rect)
+
+    def get_situation_text(self):
+        """根据胜率返回形势判断文本和颜色，以及分数文本和颜色"""
+        with self.analysis_lock:
+            if not self.analysis_results:
+                return "分析中...", (0, 0, 0), "0.0", (0, 0, 0)
+            
+            # 获取最佳着法的胜率
+            best_move = next((x for x in self.analysis_results if x['order'] == 0), None)
+            if not best_move:
+                return "等待分析", (0, 0, 0), "0.0", (0, 0, 0)
+            
+            winrate = best_move['winrate']
+            
+            # 确定当前玩家胜率
+            if self.current_player == 'w':  # 蓝方
+                blue_winrate = winrate
+                red_winrate = 100 - winrate
+            else:  # 红方
+                red_winrate = winrate
+                blue_winrate = 100 - winrate
+            
+            # 根据红方胜率判断形势
+            if (43 <= red_winrate <= 57) or (43 <= blue_winrate <= 57):
+                situation_text = "双方均势"
+                text_color = (0, 0, 0)
+            elif (57 < red_winrate <= 70) or (30 <= blue_winrate < 43):
+                situation_text = "红方小优"
+                text_color = (200, 0, 0)
+            elif (70 < red_winrate <= 90) or (10 <= blue_winrate < 30):
+                situation_text = "红方大优"
+                text_color = (200, 0, 0)
+            elif (90 < red_winrate < 99) or (1 < blue_winrate < 10):
+                situation_text = "红方胜势"
+                text_color = (200, 0, 0)
+            elif ( red_winrate >= 99) or (blue_winrate <= 1):
+                situation_text = "红方杀棋"
+                text_color = (200, 0, 0)
+            # 蓝方优势
+            elif (57 < blue_winrate <= 70) or (30 <= red_winrate < 43):
+                situation_text = "蓝方小优"
+                text_color = (0, 66, 255)
+            elif (70 < blue_winrate <= 90) or (10 <= red_winrate < 30):
+                situation_text = "蓝方大优"
+                text_color = (0, 66, 255)
+            elif (90 < blue_winrate < 100) or (0 < red_winrate < 10):
+                situation_text = "蓝方胜势"
+                text_color = (0, 66, 255)
+            elif (red_winrate <= 1) or (blue_winrate >= 99 ):
+                situation_text = "蓝方杀棋"
+                text_color = (0, 66, 255)
+            else:
+                situation_text = f"红方胜率: {red_winrate:.1f}%"
+                text_color = (0, 0, 0)
+            
+            # 计算蓝方胜率（从蓝方视角）
+            b = blue_winrate / 100.0
+            
+            # 检查是否显示M（将死）
+            if blue_winrate >= 99:   # 蓝方必胜
+                score_text = "+M"
+                score_color = (0, 66, 255)  # 蓝色
+            elif blue_winrate <= 1:  # 红方必胜
+                score_text = "-M"
+                score_color = (200, 0, 0)  # 红色
+            else:
+                # 确保b在合理范围内
+                b = max(0.0001, min(0.9999, b))
+                # 计算分数：S = 111.7 - 28.8 * ln( p/(1-p) )
+                # 但这里p是蓝方胜率，所以：
+                odds = b / (1 - b)
+                score = 5 * math.log10(odds)
+                
+                # 格式化为带符号的分数（蓝方优势为正，红方优势为负）
+                if score > 0:
+                    score_text = f"+{score:.1f}"
+                    score_color = (0, 66, 255)  # 蓝色表示蓝方优势
+                elif score < 0:
+                    score_text = f"{score:.1f}"
+                    score_color = (200, 0, 0)  # 红色表示红方优势
+                else:
+                    score_text = "0.0"
+                    score_color = (0, 0, 0)  # 黑色表示均势
+            
+            return situation_text, text_color, score_text, score_color
 
     def draw_information_panel(self):
         y0=INFORMATION_PANEL_POS
@@ -747,13 +855,11 @@ class XiangQi:
             self.screen.blit(font.render(f"不能", True, (200, 0, 0)), (x0+260, y))
         self.screen.blit(font.render(f"互吃", True, (0, 0, 0)), (x0+300, y))
 
-
     def draw_gtp_console(self):
         """GTP控制台绘制"""
         console_top = HEIGHT - GTP_CONSOLE_HEIGHT
         pygame.draw.rect(self.screen, (255, 255, 255), 
                         (COLS*TILE_SIZE, console_top, ANALYSIS_PANEL_WIDTH, GTP_CONSOLE_HEIGHT))
-        
         
         # 控制台标题
         font = pygame.font.SysFont(FONT_NAME, 20)
@@ -785,6 +891,7 @@ class XiangQi:
         bar_y = top + (self.scroll_offset /((len(self.gtp_log)*GTP_FONT_SIZE)+1)) * GTP_CONSOLE_HEIGHT
         pygame.draw.rect(self.screen, (200, 200, 200),
                         (WIDTH-10, bar_y, 8, bar_height))
+                        
     def draw_text(self, text, pos, anchor='topleft', color=(0,0,0), bg_color=None, font_size=20, bold=False, font_name=FONT_NAME):
         """改进的文字绘制支持多行"""
         font = pygame.font.SysFont(font_name, int(FONT_SCALE*font_size),bold=bold)
@@ -811,11 +918,7 @@ class XiangQi:
             setattr(rect, anchor, (pos[0], pos[1] + y_offset))
             self.screen.blit(surf, rect)
             y_offset += font.get_linesize()
-    def draw_highlight(self, row, col, color):
-        """高亮绘制方法"""
-        surface = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
-        pygame.draw.circle(surface, color, (TILE_SIZE//2, TILE_SIZE//2), TILE_SIZE//3)
-        self.screen.blit(surface, (col*TILE_SIZE, row*TILE_SIZE))
+            
     def get_fen(self, has_pla=True):
         fen = []
         for row in self.board:
@@ -837,23 +940,7 @@ class XiangQi:
         if has_pla:
             fen+=f' {pla}'
         return  fen 
-    # 事件处理部分
     
-    def try_send_command(self,cmds,enable_lock=True):
-        cmds=cmds.split("\n")
-        for cmd in cmds:
-            try:
-                self.katago_process.stdin.write(cmd+"\n")
-                self.katago_process.stdin.flush()
-                if enable_lock:
-                    with self.analysis_lock:
-                        self.gtp_log.append(('sent', cmd.strip()))
-                else:
-                    self.gtp_log.append(('sent', cmd.strip()))
-            except Exception as e:
-                self.show_error_dialog = True
-                self.error_message = f"Instruction sending failed: {str(e)}"
-
     def unselect(self,send_command=True):
         if self.selected_piece is None:
             return
@@ -863,7 +950,6 @@ class XiangQi:
             if self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE)
         
-
     def mouse_click_loc(self,col,row):
         if(col<0 or col>=COLS or row<0 or row>=ROWS): #invalid
             return
@@ -872,11 +958,11 @@ class XiangQi:
             if 0 <= row < ROWS and 0 <= col < COLS:
                 piece = self.board[row][col]
                 if piece != ' ':
-        # 检查棋子归属
+                    # 检查棋子归属
                     if (self.current_player == 'w' and piece.isupper()) or \
                         (self.current_player == 'b' and piece.islower()):
                         self.selected_piece = (row, col)
-        # 发送选中棋子的坐标
+                        # 发送选中棋子的坐标
                         color = 'B' if self.current_player == 'w' else 'W'
                         start_col = chr(col + ord('A'))
                         start_row = 9 - row
@@ -896,7 +982,6 @@ class XiangQi:
                     (self.current_player == 'b' and target_piece.islower()):
                     self.unselect()
                 else:
-                    
                     # 执行移动
                     self.board[row][col] = self.board[sr][sc]
                     self.board[sr][sc] = ' '
@@ -923,7 +1008,6 @@ class XiangQi:
             self.analysis_results.clear()
             self.selected_piece = None
 
-    
     def run(self):
         running = True
         while running:
@@ -936,7 +1020,7 @@ class XiangQi:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                elif event.type == pygame.USEREVENT:  # 自定义刷新事件
+                elif event.type == pygame.USEREVENT:
                     #self.draw_board()
                     pass
                 # 鼠标滚轮处理
@@ -975,7 +1059,7 @@ class XiangQi:
                         self.set_aggressive_mode(1)
                     elif event.key == pygame.K_4:
                         self.set_aggressive_mode(-1)
-                    elif event.key == pygame.K_5: #狮子是否能跳过己方老鼠
+                    elif event.key == pygame.K_5:    #狮子是否能跳过己方老鼠
                         rule=None
                         if(self.game_rule==0):
                             rule=2
@@ -986,7 +1070,7 @@ class XiangQi:
                         elif(self.game_rule==3):
                             rule=1
                         self.set_game_rule(rule=rule)
-                    elif event.key == pygame.K_6: #河里和陆上的老鼠是否能互吃
+                    elif event.key == pygame.K_6:    #河里和陆上的老鼠是否能互吃
                         rule=None
                         if(self.game_rule==0):
                             rule=1
