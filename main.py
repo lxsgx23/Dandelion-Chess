@@ -16,25 +16,20 @@ INITIAL_COMMANDS = "showboard"
 REFRESH_INTERVAL_SECOND = 0.02
 # 棋盘常量
 ROWS, COLS = 9, 7
-TILE_SIZE = 100
-ANALYSIS_PANEL_WIDTH = 400  # 修改为400以适配新布局
-ANNOUNCE_WIDTH = 200
-SIDEBAR_WIDTH = 400
-WIDTH = ANNOUNCE_WIDTH + COLS * TILE_SIZE + SIDEBAR_WIDTH
-HEIGHT = ROWS * TILE_SIZE
+ANALYSIS_PANEL_RATIO = 0.3  # 分析面板宽度比例
+ANNOUNCE_RATIO = 0.2  # 公告栏宽度比例
 KATAGO_COMMAND = "./resource/engine/katago.exe gtp -config ./resource/engine/engine2024.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
 #KATAGO_COMMAND = "./resource/engine/katago_eigen.exe gtp -config ./resource/engine/engine2024_cpu.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
 
 ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
 # GTP控制台常量
-GTP_CONSOLE_HEIGHT = 300
+GTP_CONSOLE_RATIO = 0.3  # GTP控制台高度比例
 GTP_MAX_LENGTH = 100
 GTP_FONT_SIZE = 16
 FONT_SCALE = 0.8
 SCROLL_SPEED = 3
 # 提示栏常量
-INFORMATION_PANEL_POS = 300
-INFORMATION_PANEL_HEIGHT = 250
+INFORMATION_PANEL_POS_RATIO = 0.5  # 信息面板位置比例
 
 PIECES = {
     'r': 'ratr', 'c': 'catr', 'd': 'dogr', 'w': 'wolfr',
@@ -84,10 +79,6 @@ def draw_arrow(arrow_surface, start_pos, end_pos, line_width, arrow_size, color=
     end_pos = (int(end_pos[0]), int(end_pos[1]))
     end_pos2 = (int(end_pos2[0]), int(end_pos2[1]))
     line_width = int(line_width)
-
-    # 创建一个半透明的 Surface
-    # arrow_surface = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
-    # arrow_surface.fill((0, 0, 0, 0))  # 透明背景
 
     # 绘制箭头线
     pygame.draw.line(
@@ -255,25 +246,19 @@ class Dandelion:
         self.last_refresh_time = 0  # 记录最后刷新棋盘时间
         # self.engine_ready = False  # 引擎是否已经在stderr里返回“GTP ready”
         pygame.init()
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        
+        # 初始窗口大小
+        self.screen_width = 1300
+        self.screen_height = 850
+        self.screen = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.RESIZABLE)
         pygame.display.set_caption("Dandelion 斗兽棋")
 
+        # 计算动态尺寸
+        self.calculate_sizes()
+        
         # 加载资源
-        self.board_img = pygame.image.load("resource/pieces/board.jpg").convert()
-        self.board_img = pygame.transform.scale(self.board_img, (COLS * TILE_SIZE, HEIGHT))
-
-        # 加载赞赏图片（如果存在）
-        try:
-            self.donate_img = pygame.image.load("resource/pieces/donate.jpg").convert_alpha()
-            self.donate_img = pygame.transform.scale(self.donate_img, (180, 180))
-        except FileNotFoundError:
-            self.donate_img = None
-
-        self.piece_images = {}
-        for key, name in PIECES.items():
-            img = pygame.image.load(f"resource/pieces/{name}.png").convert_alpha()
-            self.piece_images[key] = pygame.transform.scale(img, (TILE_SIZE - 10, TILE_SIZE - 10))
-
+        self.load_resources()
+        
         # 初始化游戏状态
         self.initial_board = [
             ['l', ' ', ' ', ' ', ' ', ' ', 't'],
@@ -291,6 +276,7 @@ class Dandelion:
         self.selected_piece = None
         self.current_player = 'w'
         self.last_move = None  # 存储最后一步移动信息
+        self.flip_board = False  # 添加翻转棋盘标志
 
         # 分析系统
         self.analyzing = True
@@ -325,6 +311,46 @@ class Dandelion:
         self.show_fen = True
         self.show_fen_message = False
         self.fen_message_time = 0
+        
+    def calculate_sizes(self):
+        """计算动态尺寸"""
+        # 棋盘格子大小
+        self.tile_size = min(self.screen_height // ROWS, self.screen_width // (COLS + 6))
+        
+        # 区域宽度
+        self.announce_width = max(200, int(self.screen_width * ANNOUNCE_RATIO))
+        self.sidebar_width = max(400, int(self.screen_width * ANALYSIS_PANEL_RATIO))
+        
+        # 棋盘区域宽度
+        self.board_width = COLS * self.tile_size
+        self.board_height = ROWS * self.tile_size
+        
+        # 信息面板位置
+        self.information_panel_pos = int(self.screen_height * INFORMATION_PANEL_POS_RATIO)
+        
+        # GTP控制台高度
+        self.gtp_console_height = int(self.screen_height * GTP_CONSOLE_RATIO)
+        
+        # 总宽度
+        self.total_width = self.announce_width + self.board_width + self.sidebar_width
+        
+    def load_resources(self):
+        """加载并缩放资源"""
+        # 加载棋盘图片并缩放
+        self.board_img = pygame.image.load("resource/pieces/board.jpg").convert()
+        self.board_img = pygame.transform.scale(self.board_img, (self.board_width, self.board_height))
+
+        # 加载赞赏图片（如果存在）
+        try:
+            self.donate_img = pygame.image.load("resource/pieces/donate.jpg").convert_alpha()
+            self.donate_img = pygame.transform.scale(self.donate_img, (180, 180))
+        except FileNotFoundError:
+            self.donate_img = None
+
+        self.piece_images = {}
+        for key, name in PIECES.items():
+            img = pygame.image.load(f"resource/pieces/{name}.png").convert_alpha()
+            self.piece_images[key] = pygame.transform.scale(img, (self.tile_size - 10, self.tile_size - 10))
 
     def start_katago(self):
         """启动KataGo进程"""
@@ -432,15 +458,6 @@ class Dandelion:
             line = self.katago_process.stderr.readline()
             if not line:
                 break
-        # if not self.engine_ready:
-        #    self.gtp_log.append(("消息","等待引擎加载中......"))
-        #    while True:
-        #        line = self.katago_process.stderr.readline()
-        #        print(line)
-        #        if("GTP ready" in line):
-        #            self.gtp_log.append(("消息","引擎加载完成"))
-        #            break
-        #    self.engine_ready=True
 
     def read_output(self):
         while True:
@@ -521,39 +538,58 @@ class Dandelion:
 
                 self.analysis_results.sort(key=lambda x: (-x['visits'], -x['winrate']))
 
+    def flip_coord(self, row, col):
+        """翻转棋盘坐标（用于翻转棋盘功能）"""
+        if self.flip_board:
+            return ROWS - 1 - row, COLS - 1 - col
+        return row, col
+
     def draw_main_board(self):
         """主程序分析面板的棋盘绘制"""
         # 绘制公告栏区域背景
-        pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, ANNOUNCE_WIDTH, HEIGHT))
+        pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, self.announce_width, self.screen_height))
         # 绘制棋盘
-        self.screen.blit(self.board_img, (ANNOUNCE_WIDTH, 0))
+        self.screen.blit(self.board_img, (self.announce_width, 0))
+        
         # 绘制最后一步移动指示
         if self.last_move:
             start, end = self.last_move
-            # 绘制起点框（绿色）
             s_row, s_col = start
-            pygame.draw.rect(self.screen, (0, 255, 0),
-                            (ANNOUNCE_WIDTH + s_col * TILE_SIZE, s_row * TILE_SIZE, TILE_SIZE, TILE_SIZE), 3)
-            # 绘制终点框（蓝色）
             e_row, e_col = end
+            
+            # 应用翻转坐标
+            s_row, s_col = self.flip_coord(s_row, s_col)
+            e_row, e_col = self.flip_coord(e_row, e_col)
+            
+            # 绘制起点框（绿色）
+            pygame.draw.rect(self.screen, (0, 255, 0),
+                            (self.announce_width + s_col * self.tile_size, s_row * self.tile_size, 
+                             self.tile_size, self.tile_size), 3)
+            # 绘制终点框（蓝色）
             pygame.draw.rect(self.screen, (0, 0, 255),
-                           (ANNOUNCE_WIDTH + e_col * TILE_SIZE, e_row * TILE_SIZE, TILE_SIZE, TILE_SIZE), 3)
+                           (self.announce_width + e_col * self.tile_size, e_row * self.tile_size, 
+                            self.tile_size, self.tile_size), 3)
 
         # 绘制选中棋子指示（红色）
         if self.selected_piece:
             row, col = self.selected_piece
+            # 应用翻转坐标
+            row, col = self.flip_coord(row, col)
             pygame.draw.rect(self.screen, (255, 0, 0),
-                           (ANNOUNCE_WIDTH + col * TILE_SIZE, row * TILE_SIZE, TILE_SIZE, TILE_SIZE), 3)
+                           (self.announce_width + col * self.tile_size, row * self.tile_size, 
+                            self.tile_size, self.tile_size), 3)
 
         # 绘制棋子
         for row in range(ROWS):
             for col in range(COLS):
                 piece = self.board[row][col]
                 if piece != ' ':
+                    # 应用翻转坐标
+                    flip_row, flip_col = self.flip_coord(row, col)
                     img = self.piece_images[piece]
                     rect = img.get_rect(center=(
-                        ANNOUNCE_WIDTH + col * TILE_SIZE + TILE_SIZE // 2,
-                        row * TILE_SIZE + TILE_SIZE // 2
+                        self.announce_width + flip_col * self.tile_size + self.tile_size // 2,
+                        flip_row * self.tile_size + self.tile_size // 2
                     ))
                     self.screen.blit(img, rect)
 
@@ -565,11 +601,13 @@ class Dandelion:
                 for result in self.analysis_results:
                     row = result['row']
                     col = result['col']
+                    # 应用翻转坐标
+                    flip_row, flip_col = self.flip_coord(row, col)
                     v = result['visits']
                     is_best_move = result['order'] == 0
-                    assert (0 <= row < ROWS and 0 <= col < COLS)
+                    assert (0 <= flip_row < ROWS and 0 <= flip_col < COLS)
                     # 创建半透明背景
-                    alpha_surface = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+                    alpha_surface = pygame.Surface((self.tile_size, self.tile_size), pygame.SRCALPHA)
                     c = float(v) / maxVisit
                     spot_alpha = 255 if is_best_move else 255 * (0.4 * c + 0.3)
                     spot_color = (255 * (1 - c), 255 * (0.5 + 0.5 * c), 255 * c, spot_alpha)
@@ -582,56 +620,59 @@ class Dandelion:
                         pygame.draw.circle(
                             alpha_surface,
                             (255, 0, 0, 255),
-                            (TILE_SIZE // 2, TILE_SIZE // 2),
-                            TILE_SIZE * 0.5
+                            (self.tile_size // 2, self.tile_size // 2),
+                            self.tile_size * 0.5
                         )
                         pygame.draw.circle(
                             alpha_surface,
                             spot_color,
-                            (TILE_SIZE // 2, TILE_SIZE // 2),
-                            TILE_SIZE * 0.45
+                            (self.tile_size // 2, self.tile_size // 2),
+                            self.tile_size * 0.45
                         )
                     else:
                         pygame.draw.circle(
                             alpha_surface,
                             spot_color,
-                            (TILE_SIZE // 2, TILE_SIZE // 2),
-                            TILE_SIZE * 0.5
+                            (self.tile_size // 2, self.tile_size // 2),
+                            self.tile_size * 0.5
                         )
                     pygame.draw.circle(
                         alpha_surface,
                         (0, 0, 0, 0),
-                        (TILE_SIZE // 2, TILE_SIZE // 2),
-                        TILE_SIZE * 0.4
+                        (self.tile_size // 2, self.tile_size // 2),
+                        self.tile_size * 0.4
                     )
-                    self.screen.blit(alpha_surface, (ANNOUNCE_WIDTH + col * TILE_SIZE, row * TILE_SIZE))
+                    self.screen.blit(alpha_surface, (self.announce_width + flip_col * self.tile_size, flip_row * self.tile_size))
 
                     self.draw_text(
                         f"{result['winrate']:.1f}%",
-                        (ANNOUNCE_WIDTH + col * TILE_SIZE + TILE_SIZE * 0.5, row * TILE_SIZE + TILE_SIZE * 0.31),
+                        (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, 
+                         flip_row * self.tile_size + self.tile_size * 0.31),
                         anchor='center',
                         color=text_color,
                         bg_color=text_bg_color,
-                        font_size=0.35 * TILE_SIZE,
+                        font_size=0.35 * self.tile_size,
                         bold=True
                     )
                     vstr = f"{v // 1000000}M" if v >= 10000000 else (f"{v // 1000}K" if v >= 10000 else f"{v}")
                     self.draw_text(
                         vstr,
-                        (ANNOUNCE_WIDTH + col * TILE_SIZE + TILE_SIZE * 0.5, row * TILE_SIZE + TILE_SIZE * 0.6),
+                        (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, 
+                         flip_row * self.tile_size + self.tile_size * 0.6),
                         anchor='center',
                         color=text_color,
                         bg_color=text_bg_color,
-                        font_size=0.25 * TILE_SIZE,
+                        font_size=0.25 * self.tile_size,
                         bold=True
                     )
                     self.draw_text(
                         f"{result['drawrate']:.1f}%",
-                        (ANNOUNCE_WIDTH + col * TILE_SIZE + TILE_SIZE * 0.5, row * TILE_SIZE + TILE_SIZE * 0.8),
+                        (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, 
+                         flip_row * self.tile_size + self.tile_size * 0.8),
                         anchor='center',
                         color=text_color,
                         bg_color=text_bg_color,
-                        font_size=0.25 * TILE_SIZE,
+                        font_size=0.25 * self.tile_size,
                         bold=True
                     )
 
@@ -651,18 +692,22 @@ class Dandelion:
                             col2 = col
                             row2 = row
                         if col1 is not None and col2 is not None:
-                            x1 = ANNOUNCE_WIDTH + col1 * TILE_SIZE + TILE_SIZE // 2
-                            x2 = ANNOUNCE_WIDTH + col2 * TILE_SIZE + TILE_SIZE // 2
-                            y1 = row1 * TILE_SIZE + TILE_SIZE // 2
-                            y2 = row2 * TILE_SIZE + TILE_SIZE // 2
+                            # 应用翻转坐标
+                            flip_row1, flip_col1 = self.flip_coord(row1, col1)
+                            flip_row2, flip_col2 = self.flip_coord(row2, col2)
+                            
+                            x1 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2
+                            x2 = self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
+                            y1 = flip_row1 * self.tile_size + self.tile_size // 2
+                            y2 = flip_row2 * self.tile_size + self.tile_size // 2
                             dx = x2 - x1
                             dy = y2 - y1
                             dis = (dx * dx + dy * dy) ** 0.5
-                            if dis > TILE_SIZE // 2:
-                                x1 += 0.5 * TILE_SIZE * dx / dis
-                                y1 += 0.5 * TILE_SIZE * dy / dis
-                                draw_arrow2(self.screen, (x1, y1), (x2, y2), TILE_SIZE * 0.15, TILE_SIZE * 0.03,
-                                           TILE_SIZE * 0.3)
+                            if dis > self.tile_size // 2:
+                                x1 += 0.5 * self.tile_size * dx / dis
+                                y1 += 0.5 * self.tile_size * dy / dis
+                                draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.15, 
+                                           self.tile_size * 0.03, self.tile_size * 0.3)
 
         self.draw_analysis_panel()
         self.draw_gtp_console()
@@ -681,27 +726,28 @@ class Dandelion:
         self.draw_text("I键: 通用和棋规则", (10, 110))
         self.draw_text("O键: 子数和棋规则", (10, 140))
         self.draw_text("P键: 子力和棋规则", (10, 170))
-        self.draw_text("9键: 输入自定义局面FEN", (10, 200))
+        self.draw_text("8键: 翻转棋盘视角", (10, 200))
+        self.draw_text("9键: 输入自定义局面FEN", (10, 230))
 
         # 绘制进入编辑器按钮
-        button_rect = pygame.Rect(10, 250, 180, 40)
+        button_rect = pygame.Rect(10, 280, 180, 40)
         pygame.draw.rect(self.screen, (200, 200, 200), button_rect)
         pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
         self.draw_text("棋盘编辑器", (button_rect.centerx, button_rect.centery), anchor='center', color=(0, 0, 0))
 
         # 绘制赞赏区域
-        self.draw_text("赞赏作者Laoxu：", (10, 310), font_size=20)
+        self.draw_text("赞赏作者Laoxu：", (10, 340), font_size=20)
         if self.donate_img:
-            self.screen.blit(self.donate_img, (10, 340))
+            self.screen.blit(self.donate_img, (10, 370))
         else:
-            pygame.draw.rect(self.screen, (200, 200, 200), (10, 340, 180, 180))
-            self.draw_text("捐赠图片位置", (100, 430), anchor='center', color=(100, 100, 100))
+            pygame.draw.rect(self.screen, (200, 200, 200), (10, 370, 180, 180))
+            self.draw_text("捐赠图片位置", (100, 460), anchor='center', color=(100, 100, 100))
 
     def draw_error_dialog(self):
         """绘制错误对话框"""
         dialog_width, dialog_height = 400, 150
-        dialog_x = (WIDTH - dialog_width) // 2
-        dialog_y = (HEIGHT - dialog_height) // 2
+        dialog_x = (self.screen_width - dialog_width) // 2
+        dialog_y = (self.screen_height - dialog_height) // 2
 
         # 绘制对话框背景
         pygame.draw.rect(self.screen, (200, 200, 200), (dialog_x, dialog_y, dialog_width, dialog_height))
@@ -723,8 +769,10 @@ class Dandelion:
 
     def draw_analysis_panel(self):
         """分析信息面板"""
-        panel_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
-        pygame.draw.rect(self.screen, (240, 240, 240), (panel_x, 0, ANALYSIS_PANEL_WIDTH, HEIGHT - GTP_CONSOLE_HEIGHT))
+        panel_x = self.announce_width + self.board_width
+        panel_height = self.screen_height - self.gtp_console_height
+        pygame.draw.rect(self.screen, (240, 240, 240), 
+                         (panel_x, 0, self.sidebar_width, panel_height))
 
         # 评估标题
         font = pygame.font.SysFont(FONT_NAME, 16)
@@ -742,9 +790,9 @@ class Dandelion:
                 y += 30
 
         # 添加形势判断区域
-        situation_y = HEIGHT - GTP_CONSOLE_HEIGHT - 80  # 在GTP控制台上方留出空间
+        situation_y = self.screen_height - self.gtp_console_height - 80  # 在GTP控制台上方留出空间
         pygame.draw.rect(self.screen, (220, 220, 220),
-                        (panel_x, situation_y, ANALYSIS_PANEL_WIDTH, 80))
+                        (panel_x, situation_y, self.sidebar_width, 80))
 
         # 获取当前形势判断文本和分数
         situation_text, text_color, score_text, score_color = self.get_situation_text()
@@ -758,7 +806,7 @@ class Dandelion:
         # 绘制形势判断文本
         font = pygame.font.SysFont(FONT_NAME, 24, bold=True)
         text_surf = font.render(situation_text, True, text_color)
-        text_rect = text_surf.get_rect(center=(panel_x + ANALYSIS_PANEL_WIDTH // 2, situation_y + 40))
+        text_rect = text_surf.get_rect(center=(panel_x + self.sidebar_width // 2, situation_y + 40))
         self.screen.blit(text_surf, text_rect)
 
     def get_situation_text(self):
@@ -805,7 +853,7 @@ class Dandelion:
             elif (70 < blue_winrate <= 90) or (10 <= red_winrate < 30):
                 situation_text = "蓝方大优"
                 text_color = (0, 66, 255)
-            elif (90 < blue_winrate < 100) or (0 < red_winrate < 10):
+            elif (90 < blue_winrate < 99) or (1 < red_winrate < 10):
                 situation_text = "蓝方胜势"
                 text_color = (0, 66, 255)
             elif (red_winrate <= 1) or (blue_winrate >= 99):
@@ -847,10 +895,10 @@ class Dandelion:
             return situation_text, text_color, score_text, score_color
 
     def draw_information_panel(self):
-        y0 = INFORMATION_PANEL_POS
-        x0 = ANNOUNCE_WIDTH + COLS * TILE_SIZE
+        y0 = self.information_panel_pos - 200
+        x0 = self.announce_width + self.board_width
         pygame.draw.rect(self.screen, (160, 160, 160),
-                        (x0, y0, ANALYSIS_PANEL_WIDTH, INFORMATION_PANEL_HEIGHT))
+                        (x0, y0, self.sidebar_width, 250))
         font = pygame.font.SysFont(FONT_NAME, 18)
 
         y = y0 + 5
@@ -903,10 +951,10 @@ class Dandelion:
 
     def draw_gtp_console(self):
         """GTP控制台绘制"""
-        console_top = HEIGHT - GTP_CONSOLE_HEIGHT
-        console_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
+        console_top = self.screen_height - self.gtp_console_height
+        console_x = self.announce_width + self.board_width
         pygame.draw.rect(self.screen, (255, 255, 255),
-                        (console_x, console_top, ANALYSIS_PANEL_WIDTH, GTP_CONSOLE_HEIGHT))
+                        (console_x, console_top, self.sidebar_width, self.gtp_console_height))
 
         # 控制台标题
         font = pygame.font.SysFont(FONT_NAME, 20)
@@ -933,11 +981,11 @@ class Dandelion:
 
     def draw_scrollbar(self, top, console_x):
         """滚动条绘制"""
-        bar_height = GTP_CONSOLE_HEIGHT * (GTP_CONSOLE_HEIGHT / ((len(self.gtp_log) * GTP_FONT_SIZE) + 1))
-        bar_height = max(20, min(bar_height, GTP_CONSOLE_HEIGHT - 20))
-        bar_y = top + (self.scroll_offset / ((len(self.gtp_log) * GTP_FONT_SIZE) + 1)) * GTP_CONSOLE_HEIGHT
+        bar_height = self.gtp_console_height * (self.gtp_console_height / ((len(self.gtp_log) * GTP_FONT_SIZE) + 1))
+        bar_height = max(20, min(bar_height, self.gtp_console_height - 20))
+        bar_y = top + (self.scroll_offset / ((len(self.gtp_log) * GTP_FONT_SIZE) + 1)) * self.gtp_console_height
         pygame.draw.rect(self.screen, (200, 200, 200),
-                        (WIDTH - 10, bar_y, 8, bar_height))
+                        (self.screen_width - 10, bar_y, 8, bar_height))
 
     def draw_text(self, text, pos, anchor='topleft', color=(0, 0, 0), bg_color=None, font_size=20, bold=False,
                  font_name=FONT_NAME):
@@ -999,6 +1047,11 @@ class Dandelion:
                 self.try_send_command(GTP_COMMAND_ANALYZE)
 
     def mouse_click_loc(self, col, row):
+        # 应用翻转坐标（如果需要）
+        if self.flip_board:
+            col = COLS - 1 - col
+            row = ROWS - 1 - row
+
         if col < 0 or col >= COLS or row < 0 or row >= ROWS:  # invalid
             return
 
@@ -1061,8 +1114,8 @@ class Dandelion:
         """棋盘编辑器绘制"""
         self.screen.fill((255, 255, 255))
         # 绘制公告栏
-        pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, ANNOUNCE_WIDTH, HEIGHT))
-        pygame.draw.rect(self.screen, (0, 0, 0), (0, 0, ANNOUNCE_WIDTH, HEIGHT), 2)
+        pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, self.announce_width, self.screen_height))
+        pygame.draw.rect(self.screen, (0, 0, 0), (0, 0, self.announce_width, self.screen_height), 2)
 
         # 绘制公告文字
         self.draw_text("操作说明：", (10, 10), font_size=24)
@@ -1085,7 +1138,7 @@ class Dandelion:
             self.draw_text("捐赠图片位置", (100, 430), anchor='center', color=(100, 100, 100))
 
         # 绘制棋盘
-        self.screen.blit(self.board_img, (ANNOUNCE_WIDTH, 0))
+        self.screen.blit(self.board_img, (self.announce_width, 0))
 
         # 绘制棋盘上的棋子
         for row in range(ROWS):
@@ -1094,8 +1147,8 @@ class Dandelion:
                 if piece != ' ':
                     img = self.piece_images[piece]
                     rect = img.get_rect(center=(
-                        ANNOUNCE_WIDTH + col * TILE_SIZE + TILE_SIZE // 2,
-                        row * TILE_SIZE + TILE_SIZE // 2
+                        self.announce_width + col * self.tile_size + self.tile_size // 2,
+                        row * self.tile_size + self.tile_size // 2
                     ))
                     self.screen.blit(img, rect)
 
@@ -1112,7 +1165,7 @@ class Dandelion:
 
         # 输出FEN
         if self.show_fen:
-            self.draw_text(f"FEN: {self.get_fen()}", (ANNOUNCE_WIDTH + 10, HEIGHT - 30), font_size=20)
+            self.draw_text(f"FEN: {self.get_fen()}", (self.announce_width + 10, self.screen_height - 30), font_size=20)
 
         # 显示复制提示
         if self.show_fen_message:
@@ -1120,12 +1173,12 @@ class Dandelion:
             if current_time - self.fen_message_time < 2000:
                 msg = "FEN已复制到剪贴板" if pyperclip else "请安装pyperclip库"
                 color = (0, 200, 0) if pyperclip else (200, 0, 0)
-                self.draw_text(msg, (ANNOUNCE_WIDTH + 10, HEIGHT - 60), font_size=20, color=color)
+                self.draw_text(msg, (self.announce_width + 10, self.screen_height - 60), font_size=20, color=color)
 
     def draw_editor_sidebar(self):
         """编辑器侧边栏绘制"""
-        sidebar_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
-        pygame.draw.rect(self.screen, (240, 240, 240), (sidebar_x, 0, SIDEBAR_WIDTH, HEIGHT))
+        sidebar_x = self.announce_width + self.board_width
+        pygame.draw.rect(self.screen, (240, 240, 240), (sidebar_x, 0, self.sidebar_width, self.screen_height))
 
         # 绘制红方棋子
         red_pieces = ['R', 'C', 'D', 'W', 'J', 'T', 'L', 'E']
@@ -1140,7 +1193,7 @@ class Dandelion:
         blue_pieces = ['r', 'c', 'd', 'w', 'j', 't', 'l', 'e']
         for i, piece in enumerate(blue_pieces):
             x = sidebar_x + 10 + (i % 2) * 90
-            y = HEIGHT // 2 + 50 + (i // 2) * 100
+            y = self.screen_height // 2 + 50 + (i // 2) * 100
             img = self.piece_images[piece]
             self.screen.blit(img, (x, y))
             pygame.draw.rect(self.screen, (0, 0, 200), (x - 5, y - 5, 90, 90), 2)
@@ -1148,13 +1201,13 @@ class Dandelion:
     def draw_current_player(self):
         text = "当前走棋方: 蓝方" if self.current_player == 'w' else "当前走棋方: 红方"
         color = (0, 0, 200) if self.current_player == 'w' else (200, 0, 0)
-        sidebar_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
+        sidebar_x = self.announce_width + self.board_width
         self.draw_text(text, (sidebar_x + 10, 10), color=color, font_size=24)
 
     def draw_editor_buttons(self):
-        sidebar_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
+        sidebar_x = self.announce_width + self.board_width
         button_x = sidebar_x + 200 + 10  # 按钮区域起始位置
-        button_y = HEIGHT - 220
+        button_y = self.screen_height - 220
 
         # 清空按钮
         self.draw_button("清空棋盘", (button_x, button_y), (180, 40), self.clear_board)
@@ -1197,15 +1250,15 @@ class Dandelion:
     def handle_editor_click(self, pos):
         x, y = pos
         # 点击侧边栏或按钮区域
-        if x > ANNOUNCE_WIDTH + COLS * TILE_SIZE:
+        if x > self.announce_width + self.board_width:
             self.handle_editor_sidebar_click(x, y)
         else:
             # 点击棋盘区域需要排除公告栏
-            if x > ANNOUNCE_WIDTH:
-                self.handle_editor_board_click(x - ANNOUNCE_WIDTH, y)
+            if x > self.announce_width:
+                self.handle_editor_board_click(x - self.announce_width, y)
 
     def handle_editor_sidebar_click(self, x, y):
-        sidebar_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
+        sidebar_x = self.announce_width + self.board_width
         # 检查红方棋子
         red_pieces = ['R', 'C', 'D', 'W', 'J', 'T', 'L', 'E']
         for i, piece in enumerate(red_pieces):
@@ -1219,7 +1272,7 @@ class Dandelion:
         blue_pieces = ['r', 'c', 'd', 'w', 'j', 't', 'l', 'e']
         for i, piece in enumerate(blue_pieces):
             rect = pygame.Rect(sidebar_x + 10 + (i % 2) * 90 - 5,
-                              HEIGHT // 2 + 50 + (i // 2) * 100 - 5, 90, 90)
+                              self.screen_height // 2 + 50 + (i // 2) * 100 - 5, 90, 90)
             if rect.collidepoint(x, y):
                 self.selected_piece_type = piece
                 self.dragging_piece = True
@@ -1228,9 +1281,9 @@ class Dandelion:
         self.check_editor_button_click(x, y)
 
     def check_editor_button_click(self, x, y):
-        sidebar_x = ANNOUNCE_WIDTH + COLS * TILE_SIZE
+        sidebar_x = self.announce_width + self.board_width
         button_x = sidebar_x + 200 + 10
-        button_y = HEIGHT - 220
+        button_y = self.screen_height - 220
 
         # 清空按钮
         if pygame.Rect(button_x, button_y, 180, 40).collidepoint(x, y):
@@ -1246,8 +1299,8 @@ class Dandelion:
             self.copy_fen()
 
     def handle_editor_board_click(self, x, y):
-        col = x // TILE_SIZE
-        row = y // TILE_SIZE
+        col = x // self.tile_size
+        row = y // self.tile_size
         if 0 <= col < COLS and 0 <= row < ROWS:
             if self.dragging_piece and self.selected_piece_type:
                 self.board[row][col] = self.selected_piece_type
@@ -1269,13 +1322,22 @@ class Dandelion:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
+                elif event.type == pygame.VIDEORESIZE:
+                    # 窗口大小变化时重新计算尺寸并重新加载资源
+                    self.screen_width, self.screen_height = event.w, event.h
+                    self.calculate_sizes()
+                    self.load_resources()
                 elif event.type == pygame.USEREVENT:
                     pass
                 # 鼠标滚轮处理
                 elif event.type == pygame.MOUSEWHEEL:
                     if self.mode == "main":
-                        console_rect = pygame.Rect(ANNOUNCE_WIDTH + COLS * TILE_SIZE, HEIGHT - GTP_CONSOLE_HEIGHT,
-                                                  ANALYSIS_PANEL_WIDTH, GTP_CONSOLE_HEIGHT)
+                        console_rect = pygame.Rect(
+                            self.announce_width + self.board_width, 
+                            self.screen_height - self.gtp_console_height,
+                            self.sidebar_width, 
+                            self.gtp_console_height
+                        )
                         if console_rect.collidepoint(pygame.mouse.get_pos()):
                             self.scroll_offset = max(0, self.scroll_offset - event.y * SCROLL_SPEED)
                 # 左键
@@ -1283,12 +1345,12 @@ class Dandelion:
                     x, y = pygame.mouse.get_pos()
                     
                     if self.show_error_dialog:
-                        button_rect = pygame.Rect((WIDTH // 2 - 50, HEIGHT // 2 + 40, 100, 40))
+                        button_rect = pygame.Rect((self.screen_width // 2 - 50, self.screen_height // 2 + 40, 100, 40))
                         if button_rect.collidepoint(x, y):
                             self.show_error_dialog = False
                     elif self.mode == "main":
                         # 检查是否点击了进入编辑器按钮
-                        editor_button_rect = pygame.Rect(10, 250, 180, 40)
+                        editor_button_rect = pygame.Rect(10, 280, 180, 40)
                         if editor_button_rect.collidepoint(x, y):
                             self.mode = "editor"
                             self.board = [row.copy() for row in self.initial_board]
@@ -1300,9 +1362,9 @@ class Dandelion:
                             continue
                         
                         # 处理棋盘点击
-                        if x > ANNOUNCE_WIDTH:
-                            col = (x - ANNOUNCE_WIDTH) // TILE_SIZE
-                            row = y // TILE_SIZE
+                        if x > self.announce_width:
+                            col = (x - self.announce_width) // self.tile_size
+                            row = y // self.tile_size
                             self.mouse_click_loc(col, row)
                     
                     elif self.mode == "editor":
@@ -1377,6 +1439,8 @@ class Dandelion:
                             self.set_movelimit(self.movenum_limit + 8)
                         elif event.key == pygame.K_DOWN:
                             self.set_movelimit(self.movenum_limit - 8)
+                        elif event.key == pygame.K_8:  # 翻转棋盘
+                            self.flip_board = not self.flip_board
                         elif event.key == pygame.K_9:
                             self.prompt_for_fen()
                         elif event.key == pygame.K_i:
