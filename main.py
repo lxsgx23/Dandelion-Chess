@@ -9,6 +9,7 @@ import math
 import glob
 import sys
 import pyperclip
+import webbrowser
 
 FONT_NAME = "simhei"
 GTP_COMMAND_ANALYZE = "kata-analyze interval 20"
@@ -19,9 +20,8 @@ ROWS, COLS = 9, 7
 ANALYSIS_PANEL_RATIO = 0.3  # 分析面板宽度比例
 ANNOUNCE_RATIO = 0.2  # 公告栏宽度比例
 KATAGO_COMMAND = "./resource/engine/katago.exe gtp -config ./resource/engine/engine2024.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
-#KATAGO_COMMAND = "./resource/engine/katago_eigen.exe gtp -config ./resource/engine/engine2024_cpu.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
 
-ANALYSIS_COLOR = (255, 255, 0, 100)  # 半透明黄色
+ANALYSIS_COLOR = (255, 255, 0, 100)
 # GTP控制台常量
 GTP_CONSOLE_RATIO = 0.3  # GTP控制台高度比例
 GTP_MAX_LENGTH = 100
@@ -254,6 +254,9 @@ class Dandelion:
         self.screen = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.RESIZABLE)
         pygame.display.set_caption("Dandelion 斗兽棋")
 
+        # 初始化需要在加载资源前定义的属性
+        self.eval_images = {} # To store evaluation images
+
         # 计算动态尺寸
         self.calculate_sizes()
         
@@ -292,6 +295,7 @@ class Dandelion:
         self.current_movenum = 0  # 目前多少步了
         self.movenum_limit = 300  # 步数限制(mm)
         self.simple_mode = False  # 精简模式标志
+        self.move_evaluation = None # To store the evaluation of the last move
 
         # kata-set-rule scoring 0   狮虎不能跳过己方老鼠，河里和陆上的老鼠不能互吃
         # kata-set-rule scoring 1   狮虎不能跳过己方老鼠，河里和陆上的老鼠能互吃
@@ -306,7 +310,7 @@ class Dandelion:
         self.set_aggressive_mode(0)
         self.set_game_rule(0)
         self.set_game_drawrule("WEIGHT")  # 修改初始化为"WEIGHT"
-
+        self.set_game_looprule("seventhree")
         # 编辑器相关变量
         self.dragging_piece = None
         self.drag_pos = (0, 0)
@@ -355,6 +359,16 @@ class Dandelion:
             img = pygame.image.load(f"resource/pieces/{name}.png").convert_alpha()
             self.piece_images[key] = pygame.transform.scale(img, (self.tile_size - 10, self.tile_size - 10))
 
+        # 加载走法评估图片
+        eval_image_names = ["nice", "brilliant", "best", "ok", "mistake", "blunder"]
+        for name in eval_image_names:
+            try:
+                img = pygame.image.load(f"resource/pieces/{name}.png").convert_alpha()
+                self.eval_images[name] = pygame.transform.scale(img, (50, 50))
+            except pygame.error:
+                self.eval_images[name] = None
+                print(f"警告: 走法评估图片加载失败: resource/pieces/{name}.png")
+
     def start_katago(self):
         """启动KataGo进程"""
         try:
@@ -383,13 +397,13 @@ class Dandelion:
         self.board = [row.copy() for row in self.initial_board]
         self.selected_piece = None
         self.current_player = 'w'
-        self.last_move = None  # 存储最后一步移动信息
+        self.last_move = None
         self.analysis_results = []
-        self.current_movenum = 0  # 目前多少步了
-        self.move_history = []  # 清空历史记录
+        self.current_movenum = 0
+        self.move_history = []
+        self.move_evaluation = None # 重置走法评估
         self.try_send_command("clear_board")
         self.set_movelimit(300)
-        # self.set_aggressive_mode(0)
 
     def sync_board_assume_locked(self, undo_once=False):
         self.current_movenum = 0
@@ -402,13 +416,14 @@ class Dandelion:
         self.current_player = next_player_should_be
 
         fen = self.get_fen(has_pla=False)
-        fen = f"{fen} {next_player_should_be}"  # katago的fen的黑白是反的。但界面也是反的
+        fen = f"{fen} {next_player_should_be}"
         self.try_send_command("setfen " + fen, enable_lock=False)
 
     def swap_side(self):
         with self.analysis_lock:
             self.current_player = get_opp(self.current_player)
             self.sync_board_assume_locked()
+            self.move_evaluation = None # 重置走法评估
             if self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
@@ -454,6 +469,14 @@ class Dandelion:
             self.sync_board_assume_locked()
             self.game_drawrule = rule
             self.try_send_command(f"kata-set-rule drawjudge {rule}", enable_lock=False)
+            if self.analyzing:
+                self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
+
+    def set_game_looprule(self, rule):
+        with self.analysis_lock:
+            self.sync_board_assume_locked()
+            self.game_looprule = rule
+            self.try_send_command(f"kata-set-rule looprule {rule}", enable_lock=False)
             if self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
@@ -542,6 +565,44 @@ class Dandelion:
 
                 self.analysis_results.sort(key=lambda x: (-x['visits'], -x['winrate']))
 
+    def evaluate_move(self, analysis_data, user_move_coords):
+        """根据用户走法评估并设置 self.move_evaluation"""
+        self.move_evaluation = None
+        if not self.analyzing or not analysis_data:
+            return
+
+        best_move = analysis_data[0]
+        best_win_rate = best_move['winrate']
+
+        user_move_result = next((m for m in analysis_data if m['row'] == user_move_coords[0] and m['col'] == user_move_coords[1]), None)
+
+        if user_move_result is None:
+            return
+
+        user_move_win_rate = user_move_result['winrate']
+        win_rate_drop = best_win_rate - user_move_win_rate
+
+        if user_move_result['move'] == best_move['move']:
+            if len(analysis_data) > 1:
+                second_best_win_rate = analysis_data[1]['winrate']
+                criticality = best_win_rate - second_best_win_rate
+                
+                if criticality > 15:
+                    self.move_evaluation = {'image_key': 'nice', 'text': "关键的一步棋。"}
+                    return
+                elif 10 < criticality <= 15:
+                    self.move_evaluation = {'image_key': 'brilliant', 'text': "太棒了！"}
+                    return
+        
+        if win_rate_drop <= 3:
+            self.move_evaluation = {'image_key': 'best', 'text': "精准的着法。"}
+        elif 3 <= win_rate_drop < 8:
+            self.move_evaluation = {'image_key': 'ok', 'text': "很好。"}
+        elif 8 <= win_rate_drop < 20:
+            self.move_evaluation = {'image_key': 'mistake', 'text': "还有更好的走法。"}
+        elif win_rate_drop >= 20:
+            self.move_evaluation = {'image_key': 'blunder', 'text': "恶手。"}
+
     def flip_coord(self, row, col):
         """翻转棋盘坐标（用于翻转棋盘功能）"""
         if self.flip_board:
@@ -561,15 +622,12 @@ class Dandelion:
             s_row, s_col = start
             e_row, e_col = end
             
-            # 应用翻转坐标
             s_row, s_col = self.flip_coord(s_row, s_col)
             e_row, e_col = self.flip_coord(e_row, e_col)
             
-            # 绘制起点框（绿色）
             pygame.draw.rect(self.screen, (0, 255, 0),
                             (self.announce_width + s_col * self.tile_size, s_row * self.tile_size, 
                              self.tile_size, self.tile_size), 3)
-            # 绘制终点框（蓝色）
             pygame.draw.rect(self.screen, (0, 0, 255),
                            (self.announce_width + e_col * self.tile_size, e_row * self.tile_size, 
                             self.tile_size, self.tile_size), 3)
@@ -577,7 +635,6 @@ class Dandelion:
         # 绘制选中棋子指示（红色）
         if self.selected_piece:
             row, col = self.selected_piece
-            # 应用翻转坐标
             row, col = self.flip_coord(row, col)
             pygame.draw.rect(self.screen, (255, 0, 0),
                            (self.announce_width + col * self.tile_size, row * self.tile_size, 
@@ -588,7 +645,6 @@ class Dandelion:
             for col in range(COLS):
                 piece = self.board[row][col]
                 if piece != ' ':
-                    # 应用翻转坐标
                     flip_row, flip_col = self.flip_coord(row, col)
                     img = self.piece_images[piece]
                     rect = img.get_rect(center=(
@@ -600,33 +656,25 @@ class Dandelion:
         with self.analysis_lock:
             # 精简模式只绘制最佳走法的箭头
             if self.simple_mode:
-                # 绘制最佳走法的箭头
                 if self.analysis_results is not None and len(self.analysis_results) >= 1:
                     best_move = None
                     for result in self.analysis_results:
                         if result['order'] == 0:
                             best_move = result
                             break
-                    if best_move is None:  # 如果没有order为0，则取第一个
+                    if best_move is None:
                         best_move = self.analysis_results[0]
 
-                    # 绘制箭头
-                    col1 = None
-                    row1 = None
-                    col2 = None
-                    row2 = None
+                    col1, row1, col2, row2 = None, None, None, None
                     if self.selected_piece is None:
-                        col1 = best_move['col']
-                        row1 = best_move['row']
+                        col1, row1 = best_move['col'], best_move['row']
                         pvs = best_move['pv'].split()
                         if len(pvs) > 1:
                             col2, row2 = movestr_to_pos(pvs[1])
                     else:
                         row1, col1 = self.selected_piece
-                        col2 = best_move['col']
-                        row2 = best_move['row']
+                        col2, row2 = best_move['col'], best_move['row']
                     if col1 is not None and col2 is not None:
-                        # 应用翻转坐标
                         flip_row1, flip_col1 = self.flip_coord(row1, col1)
                         flip_row2, flip_col2 = self.flip_coord(row2, col2)
                         
@@ -634,131 +682,64 @@ class Dandelion:
                         x2 = self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
                         y1 = flip_row1 * self.tile_size + self.tile_size // 2
                         y2 = flip_row2 * self.tile_size + self.tile_size // 2
-                        dx = x2 - x1
-                        dy = y2 - y1
+                        dx, dy = x2 - x1, y2 - y1
                         dis = (dx * dx + dy * dy) ** 0.5
                         if dis > self.tile_size // 2:
                             x1 += 0.5 * self.tile_size * dx / dis
                             y1 += 0.5 * self.tile_size * dy / dis
-                            # 在精简模式下，让箭头更粗更明显
                             draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.25, 
                                        self.tile_size * 0.05, self.tile_size * 0.4, 
                                        color=(255, 0, 0, 200), color_out=(0, 0, 0, 200))
             else:
-                # 绘制所有候选着法（完整模式）
                 if self.analysis_results is not None and len(self.analysis_results) >= 1:
                     maxVisit = float(max([x['visits'] for x in self.analysis_results]))
                     assert (maxVisit >= 1)
                     for result in self.analysis_results:
-                        row = result['row']
-                        col = result['col']
-                        # 应用翻转坐标
+                        row, col = result['row'], result['col']
                         flip_row, flip_col = self.flip_coord(row, col)
-                        v = result['visits']
-                        is_best_move = result['order'] == 0
+                        v, is_best_move = result['visits'], result['order'] == 0
                         assert (0 <= flip_row < ROWS and 0 <= flip_col < COLS)
-                        # 创建半透明背景
                         alpha_surface = pygame.Surface((self.tile_size, self.tile_size), pygame.SRCALPHA)
                         c = float(v) / maxVisit
                         spot_alpha = 255 if is_best_move else 255 * (0.4 * c + 0.3)
                         spot_color = (255 * (1 - c), 255 * (0.5 + 0.5 * c), 255 * c, spot_alpha)
-
                         text_bg_color = (spot_color[0], spot_color[1], spot_color[2], 100)
-                        # text_color=(255-text_bg_color[0],255-text_bg_color[1],255-text_bg_color[2],255)
                         text_color = (0, 0, 0, 255)
 
                         if is_best_move:
-                            pygame.draw.circle(
-                                alpha_surface,
-                                (255, 0, 0, 255),
-                                (self.tile_size // 2, self.tile_size // 2),
-                                self.tile_size * 0.5
-                            )
-                            pygame.draw.circle(
-                                alpha_surface,
-                                spot_color,
-                                (self.tile_size // 2, self.tile_size // 2),
-                                self.tile_size * 0.45
-                            )
+                            pygame.draw.circle(alpha_surface, (255, 0, 0, 255), (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.5)
+                            pygame.draw.circle(alpha_surface, spot_color, (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.45)
                         else:
-                            pygame.draw.circle(
-                                alpha_surface,
-                                spot_color,
-                                (self.tile_size // 2, self.tile_size // 2),
-                                self.tile_size * 0.5
-                            )
-                        pygame.draw.circle(
-                            alpha_surface,
-                            (0, 0, 0, 0),
-                            (self.tile_size // 2, self.tile_size // 2),
-                            self.tile_size * 0.4
-                        )
+                            pygame.draw.circle(alpha_surface, spot_color, (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.5)
+                        pygame.draw.circle(alpha_surface, (0, 0, 0, 0), (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.4)
                         self.screen.blit(alpha_surface, (self.announce_width + flip_col * self.tile_size, flip_row * self.tile_size))
 
-                        self.draw_text(
-                            f"{result['winrate']:.1f}%",
-                            (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, 
-                             flip_row * self.tile_size + self.tile_size * 0.31),
-                            anchor='center',
-                            color=text_color,
-                            bg_color=text_bg_color,
-                            font_size=0.35 * self.tile_size,
-                            bold=True
-                        )
+                        self.draw_text(f"{result['winrate']:.1f}%", (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.31), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.35 * self.tile_size, bold=True)
                         vstr = f"{v // 1000000}M" if v >= 10000000 else (f"{v // 1000}K" if v >= 10000 else f"{v}")
-                        self.draw_text(
-                            vstr,
-                            (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, 
-                             flip_row * self.tile_size + self.tile_size * 0.6),
-                            anchor='center',
-                            color=text_color,
-                            bg_color=text_bg_color,
-                            font_size=0.25 * self.tile_size,
-                            bold=True
-                        )
-                        self.draw_text(
-                            f"{result['drawrate']:.1f}%",
-                            (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, 
-                             flip_row * self.tile_size + self.tile_size * 0.8),
-                            anchor='center',
-                            color=text_color,
-                            bg_color=text_bg_color,
-                            font_size=0.25 * self.tile_size,
-                            bold=True
-                        )
+                        self.draw_text(vstr, (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.6), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.25 * self.tile_size, bold=True)
+                        self.draw_text(f"{result['drawrate']:.1f}%", (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.8), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.25 * self.tile_size, bold=True)
 
                         if is_best_move:
-                            col1 = None
-                            row1 = None
-                            col2 = None
-                            row2 = None
+                            col1, row1, col2, row2 = None, None, None, None
                             if self.selected_piece is None:
-                                col1 = col
-                                row1 = row
+                                col1, row1 = col, row
                                 pvs = result['pv'].split()
                                 if len(pvs) > 1:
                                     col2, row2 = movestr_to_pos(pvs[1])
                             else:
                                 row1, col1 = self.selected_piece
-                                col2 = col
-                                row2 = row
+                                col2, row2 = col, row
                             if col1 is not None and col2 is not None:
-                                # 应用翻转坐标
                                 flip_row1, flip_col1 = self.flip_coord(row1, col1)
                                 flip_row2, flip_col2 = self.flip_coord(row2, col2)
-                                
-                                x1 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2
-                                x2 = self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
-                                y1 = flip_row1 * self.tile_size + self.tile_size // 2
-                                y2 = flip_row2 * self.tile_size + self.tile_size // 2
-                                dx = x2 - x1
-                                dy = y2 - y1
+                                x1, x2 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2, self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
+                                y1, y2 = flip_row1 * self.tile_size + self.tile_size // 2, flip_row2 * self.tile_size + self.tile_size // 2
+                                dx, dy = x2 - x1, y2 - y1
                                 dis = (dx * dx + dy * dy) ** 0.5
                                 if dis > self.tile_size // 2:
                                     x1 += 0.5 * self.tile_size * dx / dis
                                     y1 += 0.5 * self.tile_size * dy / dis
-                                    draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.15, 
-                                               self.tile_size * 0.03, self.tile_size * 0.3)
+                                    draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.15, self.tile_size * 0.03, self.tile_size * 0.3)
 
         self.draw_analysis_panel()
         self.draw_gtp_console()
@@ -770,31 +751,58 @@ class Dandelion:
 
     def draw_main_announcement(self):
         """主程序公告栏区域"""
-        # 绘制公告文字
         self.draw_text("分析面板", (10, 10), font_size=24)
         self.draw_text("操作说明：", (10, 50), font_size=20)
         self.draw_text("棋子等素材可自由替换", (10, 80))
         self.draw_text("I键: 通用和棋规则", (10, 110))
-        self.draw_text("O键: 子数和棋规则", (10, 140))
-        self.draw_text("P键: 子力和棋规则", (10, 170))
-        self.draw_text("7键: 悔棋", (10, 200))
-        self.draw_text("8键: 翻转棋盘视角", (10, 230))
-        self.draw_text("9键: 输入自定义局面FEN", (10, 260))
-        self.draw_text("A键: 切换精简模式", (10, 290))  # 新增精简模式说明
+        self.draw_text("O键: 子数和棋规则", (10, 130))
+        self.draw_text("P键: 子力和棋规则", (10, 150))
+        self.draw_text("7键: 悔棋", (10, 170))
+        self.draw_text("8键: 翻转棋盘视角", (10, 190))
+        self.draw_text("9键: 输入自定义局面FEN", (10, 210))
+        self.draw_text("W键: 快速出招", (10, 230))
+        self.draw_text("A键: 切换精简模式", (10, 250))
+        self.draw_text("GHJKL键: 切换和规", (10, 270))
 
-        # 绘制进入编辑器按钮
         button_rect = pygame.Rect(10, 310, 180, 40)
         pygame.draw.rect(self.screen, (200, 200, 200), button_rect)
         pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
         self.draw_text("棋盘编辑器", (button_rect.centerx, button_rect.centery), anchor='center', color=(0, 0, 0))
 
-        # 绘制赞赏区域
         self.draw_text("赞赏作者Laoxu：", (10, 370), font_size=20)
         if self.donate_img:
             self.screen.blit(self.donate_img, (10, 400))
         else:
             pygame.draw.rect(self.screen, (200, 200, 200), (10, 400, 180, 180))
             self.draw_text("捐赠图片位置", (100, 490), anchor='center', color=(100, 100, 100))
+        
+        self.draw_move_evaluation()
+
+        link_y = 780  # 链接起始Y坐标
+        
+        self.draw_text("【Dandelion Chess】发布页", (10, link_y), color=(0, 0, 255), font_size=25)
+        self.link1_rect = pygame.Rect(10, link_y, 250, 25)
+        self.draw_text("【KataGo修改版】发布页", (10, link_y + 30), color=(0, 0, 255), font_size=25)
+        self.link2_rect = pygame.Rect(10, link_y + 30, 250, 25)
+
+
+    def draw_move_evaluation(self):
+        """如果可用，则绘制走法评估图像和文本"""
+        if self.mode == "main" and self.analyzing and self.move_evaluation:
+            eval_data = self.move_evaluation
+            image_key = eval_data.get('image_key')
+            image = self.eval_images.get(image_key) if image_key else None
+            text = eval_data.get('text', '')
+            
+            base_y = 590
+            
+            if image:
+                img_rect = image.get_rect(topleft=(20, base_y))
+                self.screen.blit(image, img_rect)
+                text_x = img_rect.right + 10
+                self.draw_text(text, (text_x, base_y + 15), anchor='w', font_size=22, color=(50, 50, 50), bold=True)
+            else:
+                self.draw_text(text, (20, base_y + 15), anchor='w', font_size=22, color=(50, 50, 50), bold=True)
 
     def draw_error_dialog(self):
         """绘制错误对话框"""
@@ -802,16 +810,13 @@ class Dandelion:
         dialog_x = (self.screen_width - dialog_width) // 2
         dialog_y = (self.screen_height - dialog_height) // 2
 
-        # 绘制对话框背景
         pygame.draw.rect(self.screen, (200, 200, 200), (dialog_x, dialog_y, dialog_width, dialog_height))
         pygame.draw.rect(self.screen, (100, 100, 100), (dialog_x, dialog_y, dialog_width, dialog_height), 2)
 
-        # 绘制错误信息
         font = pygame.font.SysFont(FONT_NAME, 20)
         error_text = font.render(self.error_message, True, (0, 0, 0))
         self.screen.blit(error_text, (dialog_x + 20, dialog_y + 30))
 
-        # 绘制确定按钮
         button_rect = pygame.Rect(dialog_x + 150, dialog_y + 90, 100, 40)
         pygame.draw.rect(self.screen, (150, 150, 150), button_rect)
         pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
@@ -827,12 +832,10 @@ class Dandelion:
         pygame.draw.rect(self.screen, (240, 240, 240), 
                          (panel_x, 0, self.sidebar_width, panel_height))
 
-        # 评估标题
         font = pygame.font.SysFont(FONT_NAME, 16)
         text = font.render("选点列表", True, (0, 0, 0))
         self.screen.blit(text, (panel_x + 10, 10))
 
-        # 分析结果列表
         y = 50
         with self.analysis_lock:
             for idx, result in enumerate(self.analysis_results[:10]):
@@ -842,21 +845,17 @@ class Dandelion:
                 self.screen.blit(text_surf, (panel_x + 10, y))
                 y += 30
 
-        # 添加形势判断区域
-        situation_y = self.screen_height - self.gtp_console_height - 80  # 在GTP控制台上方留出空间
+        situation_y = self.screen_height - self.gtp_console_height - 80
         pygame.draw.rect(self.screen, (220, 220, 220),
                         (panel_x, situation_y, self.sidebar_width, 80))
 
-        # 获取当前形势判断文本和分数
         situation_text, text_color, score_text, score_color = self.get_situation_text()
 
-        # 绘制分数（左侧固定位置）
         font = pygame.font.SysFont(FONT_NAME, 32, bold=False)
         score_surf = font.render(score_text, True, score_color)
         score_rect = score_surf.get_rect(center=(panel_x + 50, situation_y + 40))
         self.screen.blit(score_surf, score_rect)
 
-        # 绘制形势判断文本
         font = pygame.font.SysFont(FONT_NAME, 24, bold=True)
         text_surf = font.render(situation_text, True, text_color)
         text_rect = text_surf.get_rect(center=(panel_x + self.sidebar_width // 2, situation_y + 40))
@@ -868,82 +867,55 @@ class Dandelion:
             if not self.analysis_results:
                 return "分析中...", (0, 0, 0), "0.0", (0, 0, 0)
 
-            # 获取最佳着法的胜率
             best_move = next((x for x in self.analysis_results if x['order'] == 0), None)
             if not best_move:
                 return "等待分析", (0, 0, 0), "0.0", (0, 0, 0)
 
             winrate = best_move['winrate']
 
-            # 确定当前玩家胜率
-            if self.current_player == 'w':  # 蓝方
+            if self.current_player == 'w':
                 blue_winrate = winrate
                 red_winrate = 100 - winrate
-            else:  # 红方
+            else:
                 red_winrate = winrate
                 blue_winrate = 100 - winrate
 
-            # 根据红方胜率判断形势
             if (43 <= red_winrate <= 57) or (43 <= blue_winrate <= 57):
-                situation_text = "双方均势"
-                text_color = (0, 0, 0)
+                situation_text, text_color = "双方均势", (0, 0, 0)
             elif (57 < red_winrate <= 70) or (30 <= blue_winrate < 43):
-                situation_text = "红方小优"
-                text_color = (200, 0, 0)
+                situation_text, text_color = "红方小优", (200, 0, 0)
             elif (70 < red_winrate <= 90) or (10 <= blue_winrate < 30):
-                situation_text = "红方大优"
-                text_color = (200, 0, 0)
+                situation_text, text_color = "红方大优", (200, 0, 0)
             elif (90 < red_winrate < 99) or (1 < blue_winrate < 10):
-                situation_text = "红方胜势"
-                text_color = (200, 0, 0)
+                situation_text, text_color = "红方胜势", (200, 0, 0)
             elif (red_winrate >= 99) or (blue_winrate <= 1):
-                situation_text = "红方杀棋"
-                text_color = (200, 0, 0)
-            # 蓝方优势
+                situation_text, text_color = "红方杀棋", (200, 0, 0)
             elif (57 < blue_winrate <= 70) or (30 <= red_winrate < 43):
-                situation_text = "蓝方小优"
-                text_color = (0, 66, 255)
+                situation_text, text_color = "蓝方小优", (0, 66, 255)
             elif (70 < blue_winrate <= 90) or (10 <= red_winrate < 30):
-                situation_text = "蓝方大优"
-                text_color = (0, 66, 255)
+                situation_text, text_color = "蓝方大优", (0, 66, 255)
             elif (90 < blue_winrate < 99) or (1 < red_winrate < 10):
-                situation_text = "蓝方胜势"
-                text_color = (0, 66, 255)
+                situation_text, text_color = "蓝方胜势", (0, 66, 255)
             elif (red_winrate <= 1) or (blue_winrate >= 99):
-                situation_text = "蓝方杀棋"
-                text_color = (0, 66, 255)
+                situation_text, text_color = "蓝方杀棋", (0, 66, 255)
             else:
-                situation_text = f"红方胜率: {red_winrate:.1f}%"
-                text_color = (0, 0, 0)
+                situation_text, text_color = f"红方胜率: {red_winrate:.1f}%", (0, 0, 0)
 
-            # 计算蓝方胜率（从蓝方视角）
             b = blue_winrate / 100.0
-
-            # 检查是否显示M（将死）
-            if blue_winrate >= 99:  # 蓝方必胜
-                score_text = "+M"
-                score_color = (0, 66, 255)  # 蓝色
-            elif blue_winrate <= 1:  # 红方必胜
-                score_text = "-M"
-                score_color = (200, 0, 0)  # 红色
+            if blue_winrate >= 99:
+                score_text, score_color = "+M", (0, 66, 255)
+            elif blue_winrate <= 1:
+                score_text, score_color = "-M", (200, 0, 0)
             else:
-                # 确保b在合理范围内
                 b = max(0.0001, min(0.9999, b))
-                # 计算分数：S = 111.7 - 28.8 * ln( p/(1-p) )
-                # 但这里p是蓝方胜率，所以：
                 odds = b / (1 - b)
                 score = 5 * math.log10(odds)
-
-                # 格式化为带符号的分数（蓝方优势为正，红方优势为负）
                 if score > 0:
-                    score_text = f"+{score:.1f}"
-                    score_color = (0, 66, 255)  # 蓝色表示蓝方优势
+                    score_text, score_color = f"+{score:.1f}", (0, 66, 255)
                 elif score < 0:
-                    score_text = f"{score:.1f}"
-                    score_color = (200, 0, 0)  # 红色表示红方优势
+                    score_text, score_color = f"{score:.1f}", (200, 0, 0)
                 else:
-                    score_text = "0.0"
-                    score_color = (0, 0, 0)  # 黑色表示均势
+                    score_text, score_color = "0.0", (0, 0, 0)
 
             return situation_text, text_color, score_text, score_color
 
@@ -954,7 +926,6 @@ class Dandelion:
                         (x0, y0, self.sidebar_width, 250))
         font = pygame.font.SysFont(FONT_NAME, 18)
 
-        # 添加精简模式状态显示
         mode_color = (0, 200, 0) if self.simple_mode else (200, 0, 0)
         mode_text = "精简模式" if self.simple_mode else "专业模式"
         self.draw_text(f"显示方式: {mode_text}", (x0 + 10, y0 + 5), color=mode_color, font_size=18)
@@ -983,8 +954,6 @@ class Dandelion:
         elif self.aggressive_mode == -1:
             self.screen.blit(font.render(f"红激进", True, (200, 0, 0)), (x0 + 70, y))
             self.screen.blit(font.render(f"蓝保守", True, (0, 66, 255)), (x0 + 140, y))
-        else:
-            assert (False)
 
         y += 25
         self.screen.blit(font.render(f"当前步数：{self.current_movenum}, 还有{self.movenum_limit - self.current_movenum}步强制判和", True, (0, 0, 0)), (x0 + 10, y))
@@ -993,17 +962,17 @@ class Dandelion:
 
         y += 25
         self.screen.blit(font.render(f"按5键切换：狮虎", True, (0, 0, 0)), (x0 + 10, y))
-        if self.game_rule == 2 or self.game_rule == 3:
+        if self.game_rule in [2, 3]:
             self.screen.blit(font.render(f"能", True, (0, 100, 0)), (x0 + 160, y))
-        elif self.game_rule == 0 or self.game_rule == 1:
+        else:
             self.screen.blit(font.render(f"不能", True, (200, 0, 0)), (x0 + 150, y))
         self.screen.blit(font.render(f"跳过己方老鼠", True, (0, 0, 0)), (x0 + 190, y))
 
         y += 25
         self.screen.blit(font.render(f"按6键切换：河里和陆上的老鼠", True, (0, 0, 0)), (x0 + 10, y))
-        if self.game_rule == 1 or self.game_rule == 3:
+        if self.game_rule in [1, 3]:
             self.screen.blit(font.render(f"能", True, (0, 100, 0)), (x0 + 270, y))
-        elif self.game_rule == 0 or self.game_rule == 2:
+        else:
             self.screen.blit(font.render(f"不能", True, (200, 0, 0)), (x0 + 260, y))
         self.screen.blit(font.render(f"互吃", True, (0, 0, 0)), (x0 + 300, y))
 
@@ -1014,12 +983,10 @@ class Dandelion:
         pygame.draw.rect(self.screen, (255, 255, 255),
                         (console_x, console_top, self.sidebar_width, self.gtp_console_height))
 
-        # 控制台标题
         font = pygame.font.SysFont(FONT_NAME, 20)
         title = font.render("GTP 信息", True, (0, 0, 0))
         self.screen.blit(title, (console_x + 10, console_top - 30))
 
-        # 日志内容
         font = pygame.font.SysFont(FONT_NAME, GTP_FONT_SIZE)
         y_increase = GTP_FONT_SIZE + 2
         y_start = console_top + 30 - self.scroll_offset * y_increase
@@ -1034,7 +1001,6 @@ class Dandelion:
                 self.screen.blit(text_surf, (console_x + 10, y_start))
                 y_start += y_increase
 
-        # 滚动条
         self.draw_scrollbar(console_top, console_x)
 
     def draw_scrollbar(self, top, console_x):
@@ -1045,33 +1011,41 @@ class Dandelion:
         pygame.draw.rect(self.screen, (200, 200, 200),
                         (self.screen_width - 10, bar_y, 8, bar_height))
 
-    def draw_text(self, text, pos, anchor='topleft', color=(0, 0, 0), bg_color=None, font_size=20, bold=False,
-                 font_name=FONT_NAME):
-        """改进的文字绘制支持多行"""
+    def draw_text(self, text, pos, anchor='topleft', color=(0, 0, 0), bg_color=None, font_size=20, bold=False, font_name=FONT_NAME):
+        """改进的文字绘制支持多行和对齐"""
         font = pygame.font.SysFont(font_name, int(FONT_SCALE * font_size), bold=bold)
         lines = text.split('\n')
-        total_height = len(lines) * font.get_linesize()
+        
+        is_w_anchor = anchor == 'w'
+        if is_w_anchor:
+            anchor = 'topleft'
 
         surfaces = []
         max_width = 0
+        total_height = 0
         for line in lines:
             text_surf = font.render(line, True, color)
             surfaces.append(text_surf)
             max_width = max(max_width, text_surf.get_width())
+            total_height += text_surf.get_height()
+
+        y_offset = pos[1]
+        if is_w_anchor:
+            y_offset = pos[1] - total_height // 2 
 
         if bg_color:
             bg_surf = pygame.Surface((max_width + 4, total_height + 4), pygame.SRCALPHA)
             bg_surf.fill((*bg_color[:3], bg_color[3] if len(bg_color) > 3 else 255))
             bg_rect = bg_surf.get_rect()
-            setattr(bg_rect, anchor, pos)
+            setattr(bg_rect, anchor, (pos[0], y_offset))
             self.screen.blit(bg_surf, bg_rect)
-
-        y_offset = 0
+        
+        line_y = y_offset
         for surf in surfaces:
             rect = surf.get_rect()
-            setattr(rect, anchor, (pos[0], pos[1] + y_offset))
+            setattr(rect, anchor, (pos[0], line_y))
             self.screen.blit(surf, rect)
-            y_offset += font.get_linesize()
+            line_y += surf.get_height()
 
     def get_fen(self, has_pla=True):
         fen = []
@@ -1105,126 +1079,89 @@ class Dandelion:
                 self.try_send_command(GTP_COMMAND_ANALYZE)
 
     def mouse_click_loc(self, col, row):
-        # 应用翻转坐标（如果需要）
         if self.flip_board:
-            col = COLS - 1 - col
-            row = ROWS - 1 - row
+            col, row = COLS - 1 - col, ROWS - 1 - row
 
-        if col < 0 or col >= COLS or row < 0 or row >= ROWS:  # invalid
+        if col < 0 or col >= COLS or row < 0 or row >= ROWS:
             return
 
         if self.selected_piece is None:
+            self.move_evaluation = None # 清除上一手棋的评估
             if 0 <= row < ROWS and 0 <= col < COLS:
                 piece = self.board[row][col]
                 if piece != ' ':
-                    # 检查棋子归属
                     if (self.current_player == 'w' and piece.isupper()) or \
-                            (self.current_player == 'b' and piece.islower()):
+                       (self.current_player == 'b' and piece.islower()):
                         self.selected_piece = (row, col)
-                        # 发送选中棋子的坐标
                         color = 'B' if self.current_player == 'w' else 'W'
-                        start_col = chr(col + ord('A'))
-                        start_row = 9 - row
-                        cmd = f"play {color} {start_col}{start_row}\n"
-                        self.try_send_command(cmd)
+                        start_col, start_row = chr(col + ord('A')), 9 - row
+                        self.try_send_command(f"play {color} {start_col}{start_row}\n")
                         self.analysis_results.clear()
                         if self.analyzing:
                             self.try_send_command(GTP_COMMAND_ANALYZE)
         else:
-            # 移动棋子处理...
             if 0 <= row < ROWS and 0 <= col < COLS:
                 sr, sc = self.selected_piece
-                # 检查目标位置合法性
                 target_piece = self.board[row][col]
-                # 禁止吃己方棋子
                 if (self.current_player == 'w' and target_piece.isupper()) or \
-                        (self.current_player == 'b' and target_piece.islower()):
+                   (self.current_player == 'b' and target_piece.islower()):
                     self.unselect()
                 else:
-                    # 记录被吃掉的棋子（如果有）
-                    captured_piece = self.board[row][col] if self.board[row][col] != ' ' else None
-                    
-                    # 执行移动
-                    self.board[row][col] = self.board[sr][sc]
-                    self.board[sr][sc] = ' '
+                    pre_move_analysis = self.analysis_results.copy()
+                    user_move_coords = (row, col)
 
-                    # 发送GTP指令
-                    start_col = chr(sc + ord('A'))
-                    start_row = 9 - sr
-                    end_col = chr(col + ord('A'))
-                    end_row = 9 - row
+                    captured_piece = self.board[row][col] if self.board[row][col] != ' ' else None
+                    self.board[row][col], self.board[sr][sc] = self.board[sr][sc], ' '
+
+                    start_col, start_row = chr(sc + ord('A')), 9 - sr
+                    end_col, end_row = chr(col + ord('A')), 9 - row
                     color = 'B' if self.current_player == 'w' else 'W'
-                    cmd = f"play {color} {end_col}{end_row}"
-                    self.try_send_command(cmd)
+                    self.try_send_command(f"play {color} {end_col}{end_row}")
                     self.analysis_results.clear()
                     if self.analyzing:
                         self.try_send_command(GTP_COMMAND_ANALYZE)
 
-                    # 记录最后一步移动
+                    self.evaluate_move(pre_move_analysis, user_move_coords)
+
                     self.last_move = ((sr, sc), (row, col))
                     self.current_movenum += 1
                     
-                    # 保存历史记录
                     self.move_history.append({
-                        'start': (sr, sc),
-                        'end': (row, col),
-                        'piece': self.board[row][col],
-                        'captured': captured_piece,
+                        'start': (sr, sc), 'end': (row, col),
+                        'piece': self.board[row][col], 'captured': captured_piece,
                         'player': self.current_player
                     })
                     
-                    # 切换玩家
                     self.current_player = 'b' if self.current_player == 'w' else 'w'
                     print(f"Current FEN: {self.get_fen()}")
 
             self.analysis_results.clear()
             self.selected_piece = None
 
-    # ================= 新增悔棋功能 =================
     def undo_move(self):
         """悔棋功能：撤销上一步移动"""
-        # 如果已经选中棋子但未移动，不能悔棋
         if self.selected_piece is not None:
             return
-            
-        # 如果没有历史记录可撤销
-        if len(self.move_history) == 0:
+        if not self.move_history:
             return
             
-        # 获取最后一步移动记录
         last_move = self.move_history.pop()
-        
-        # 恢复棋盘状态
         sr, sc = last_move['start']
         er, ec = last_move['end']
         
-        # 将被移动的棋子放回原位置
         self.board[sr][sc] = last_move['piece']
-        
-        # 恢复被吃掉的棋子（如果有）
-        if last_move['captured'] is not None:
-            self.board[er][ec] = last_move['captured']
-        else:
-            self.board[er][ec] = ' '
+        self.board[er][ec] = last_move['captured'] if last_move['captured'] else ' '
             
-        # 恢复当前玩家
         self.current_player = last_move['player']
-        
-        # 清空选中状态和最后移动标记
         self.selected_piece = None
         self.last_move = None
-        
-        # 更新步数
+        self.move_evaluation = None # 清除走法评估
         self.current_movenum -= 1
         
-        # 向引擎发送两次undo
         self.try_send_command("undo")
         self.try_send_command("undo")
         
-        # 清空分析结果
         self.analysis_results.clear()
-        
-        # 如果分析正在进行，重新发送分析命令
         if self.analyzing:
             self.try_send_command(GTP_COMMAND_ANALYZE)
 
@@ -1232,23 +1169,19 @@ class Dandelion:
     def draw_editor(self):
         """棋盘编辑器绘制"""
         self.screen.fill((255, 255, 255))
-        # 绘制公告栏
         pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, self.announce_width, self.screen_height))
         pygame.draw.rect(self.screen, (0, 0, 0), (0, 0, self.announce_width, self.screen_height), 2)
 
-        # 绘制公告文字
         self.draw_text("操作说明：", (10, 10), font_size=24)
         self.draw_text(" 单击棋盘棋子移除", (10, 40))
         self.draw_text(" 拖动侧边棋子放置", (10, 70))
         self.draw_text(" 可复制Fen到剪贴板", (10, 100))
         
-        # 绘制返回按钮（放在公告栏中）
         button_rect = pygame.Rect(10, 250, 180, 40)
         pygame.draw.rect(self.screen, (200, 200, 200), button_rect)
         pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
         self.draw_text("分析面板", (button_rect.centerx, button_rect.centery), anchor='center', color=(0, 0, 0))
 
-        # 绘制赞赏区域
         self.draw_text("赞赏作者Laoxu：", (10, 310), font_size=20)
         if self.donate_img:
             self.screen.blit(self.donate_img, (10, 340))
@@ -1256,10 +1189,8 @@ class Dandelion:
             pygame.draw.rect(self.screen, (200, 200, 200), (10, 340, 180, 180))
             self.draw_text("捐赠图片位置", (100, 430), anchor='center', color=(100, 100, 100))
 
-        # 绘制棋盘
         self.screen.blit(self.board_img, (self.announce_width, 0))
 
-        # 绘制棋盘上的棋子
         for row in range(ROWS):
             for col in range(COLS):
                 piece = self.board[row][col]
@@ -1271,22 +1202,18 @@ class Dandelion:
                     ))
                     self.screen.blit(img, rect)
 
-        # 绘制侧边栏和按钮
         self.draw_editor_sidebar()
         self.draw_editor_buttons()
         self.draw_current_player()
 
-        # 绘制拖拽中的棋子
         if self.dragging_piece:
             img = self.piece_images[self.selected_piece_type]
             rect = img.get_rect(center=self.drag_pos)
             self.screen.blit(img, rect)
 
-        # 输出FEN
         if self.show_fen:
             self.draw_text(f"FEN: {self.get_fen()}", (self.announce_width + 10, self.screen_height - 30), font_size=20)
 
-        # 显示复制提示
         if self.show_fen_message:
             current_time = pygame.time.get_ticks()
             if current_time - self.fen_message_time < 2000:
@@ -1299,7 +1226,6 @@ class Dandelion:
         sidebar_x = self.announce_width + self.board_width
         pygame.draw.rect(self.screen, (240, 240, 240), (sidebar_x, 0, self.sidebar_width, self.screen_height))
 
-        # 绘制红方棋子
         red_pieces = ['R', 'C', 'D', 'W', 'J', 'T', 'L', 'E']
         for i, piece in enumerate(red_pieces):
             x = sidebar_x + 10 + (i % 2) * 90
@@ -1308,7 +1234,6 @@ class Dandelion:
             self.screen.blit(img, (x, y))
             pygame.draw.rect(self.screen, (200, 0, 0), (x - 5, y - 5, 90, 90), 2)
 
-        # 绘制蓝方棋子
         blue_pieces = ['r', 'c', 'd', 'w', 'j', 't', 'l', 'e']
         for i, piece in enumerate(blue_pieces):
             x = sidebar_x + 10 + (i % 2) * 90
@@ -1325,16 +1250,12 @@ class Dandelion:
 
     def draw_editor_buttons(self):
         sidebar_x = self.announce_width + self.board_width
-        button_x = sidebar_x + 200 + 10  # 按钮区域起始位置
+        button_x = sidebar_x + 200 + 10
         button_y = self.screen_height - 220
 
-        # 清空按钮
         self.draw_button("清空棋盘", (button_x, button_y), (180, 40), self.clear_board)
-        # 恢复按钮
         self.draw_button("恢复初始", (button_x, button_y + 50), (180, 40), self.reset_board)
-        # 切换走棋方
         self.draw_button("切换方", (button_x, button_y + 100), (180, 40), self.swap_player)
-        # 复制FEN按钮
         self.draw_button("复制FEN", (button_x, button_y + 150), (180, 40), self.copy_fen)
 
     def draw_button(self, text, pos, size, callback):
@@ -1368,35 +1289,28 @@ class Dandelion:
 
     def handle_editor_click(self, pos):
         x, y = pos
-        # 点击侧边栏或按钮区域
         if x > self.announce_width + self.board_width:
             self.handle_editor_sidebar_click(x, y)
         else:
-            # 点击棋盘区域需要排除公告栏
             if x > self.announce_width:
                 self.handle_editor_board_click(x - self.announce_width, y)
 
     def handle_editor_sidebar_click(self, x, y):
         sidebar_x = self.announce_width + self.board_width
-        # 检查红方棋子
         red_pieces = ['R', 'C', 'D', 'W', 'J', 'T', 'L', 'E']
         for i, piece in enumerate(red_pieces):
-            rect = pygame.Rect(sidebar_x + 10 + (i % 2) * 90 - 5,
-                              50 + (i // 2) * 100 - 5, 90, 90)
+            rect = pygame.Rect(sidebar_x + 10 + (i % 2) * 90 - 5, 50 + (i // 2) * 100 - 5, 90, 90)
             if rect.collidepoint(x, y):
                 self.selected_piece_type = piece
                 self.dragging_piece = True
                 return
-        # 检查蓝方棋子
         blue_pieces = ['r', 'c', 'd', 'w', 'j', 't', 'l', 'e']
         for i, piece in enumerate(blue_pieces):
-            rect = pygame.Rect(sidebar_x + 10 + (i % 2) * 90 - 5,
-                              self.screen_height // 2 + 50 + (i // 2) * 100 - 5, 90, 90)
+            rect = pygame.Rect(sidebar_x + 10 + (i % 2) * 90 - 5, self.screen_height // 2 + 50 + (i // 2) * 100 - 5, 90, 90)
             if rect.collidepoint(x, y):
                 self.selected_piece_type = piece
                 self.dragging_piece = True
                 return
-        # 检查按钮点击
         self.check_editor_button_click(x, y)
 
     def check_editor_button_click(self, x, y):
@@ -1404,27 +1318,17 @@ class Dandelion:
         button_x = sidebar_x + 200 + 10
         button_y = self.screen_height - 220
 
-        # 清空按钮
-        if pygame.Rect(button_x, button_y, 180, 40).collidepoint(x, y):
-            self.clear_board()
-        # 恢复按钮
-        elif pygame.Rect(button_x, button_y + 50, 180, 40).collidepoint(x, y):
-            self.reset_board()
-        # 切换走棋方
-        elif pygame.Rect(button_x, button_y + 100, 180, 40).collidepoint(x, y):
-            self.swap_player()
-        # 复制FEN按钮
-        elif pygame.Rect(button_x, button_y + 150, 180, 40).collidepoint(x, y):
-            self.copy_fen()
+        if pygame.Rect(button_x, button_y, 180, 40).collidepoint(x, y): self.clear_board()
+        elif pygame.Rect(button_x, button_y + 50, 180, 40).collidepoint(x, y): self.reset_board()
+        elif pygame.Rect(button_x, button_y + 100, 180, 40).collidepoint(x, y): self.swap_player()
+        elif pygame.Rect(button_x, button_y + 150, 180, 40).collidepoint(x, y): self.copy_fen()
 
     def handle_editor_board_click(self, x, y):
-        col = x // self.tile_size
-        row = y // self.tile_size
+        col, row = x // self.tile_size, y // self.tile_size
         if 0 <= col < COLS and 0 <= row < ROWS:
             if self.dragging_piece and self.selected_piece_type:
                 self.board[row][col] = self.selected_piece_type
             else:
-                # 点击已有棋子删除
                 self.board[row][col] = ' '
         self.dragging_piece = False
 
@@ -1433,7 +1337,6 @@ class Dandelion:
         running = True
         while running:
             current_time = time.time()
-            # 每0.5秒强制刷新界面
             if current_time - self.last_refresh_time >= REFRESH_INTERVAL_SECOND:
                 pygame.event.post(pygame.event.Event(pygame.USEREVENT))
                 self.last_refresh_time = current_time
@@ -1442,24 +1345,16 @@ class Dandelion:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.VIDEORESIZE:
-                    # 窗口大小变化时重新计算尺寸并重新加载资源
                     self.screen_width, self.screen_height = event.w, event.h
                     self.calculate_sizes()
                     self.load_resources()
                 elif event.type == pygame.USEREVENT:
                     pass
-                # 鼠标滚轮处理
                 elif event.type == pygame.MOUSEWHEEL:
                     if self.mode == "main":
-                        console_rect = pygame.Rect(
-                            self.announce_width + self.board_width, 
-                            self.screen_height - self.gtp_console_height,
-                            self.sidebar_width, 
-                            self.gtp_console_height
-                        )
+                        console_rect = pygame.Rect(self.announce_width + self.board_width, self.screen_height - self.gtp_console_height, self.sidebar_width, self.gtp_console_height)
                         if console_rect.collidepoint(pygame.mouse.get_pos()):
                             self.scroll_offset = max(0, self.scroll_offset - event.y * SCROLL_SPEED)
-                # 左键
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     x, y = pygame.mouse.get_pos()
                     
@@ -1468,37 +1363,33 @@ class Dandelion:
                         if button_rect.collidepoint(x, y):
                             self.show_error_dialog = False
                     elif self.mode == "main":
-                        # 检查是否点击了进入编辑器按钮
+                        if hasattr(self, 'link1_rect') and self.link1_rect.collidepoint(x, y):
+                            webbrowser.open("https://github.com/lxsgx23/Dandelion-Chess")
+                        elif hasattr(self, 'link2_rect') and self.link2_rect.collidepoint(x, y):
+                            webbrowser.open("https://github.com/hzyhhzy/KataGomo/tree/AnimalChess2025")
+                            
                         editor_button_rect = pygame.Rect(10, 310, 180, 40)
                         if editor_button_rect.collidepoint(x, y):
                             self.mode = "editor"
                             self.board = [row.copy() for row in self.initial_board]
                             self.current_player = 'w'
-                            
-                            # 暂停分析
                             self.analyzing = False
                             self.try_send_command("stop")
                             continue
                         
-                        # 处理棋盘点击
                         if x > self.announce_width:
                             col = (x - self.announce_width) // self.tile_size
                             row = y // self.tile_size
                             self.mouse_click_loc(col, row)
                     
                     elif self.mode == "editor":
-                        # 检查是否点击了返回按钮
                         button_rect = pygame.Rect(10, 250, 180, 40)
                         if button_rect.collidepoint(x, y):
                             self.mode = "main"
-                            self.restart_game()  # 重置主程序分析面板
-                            
-                            # 继续分析
+                            self.restart_game()
                             self.analyzing = True
                             self.try_send_command(GTP_COMMAND_ANALYZE)
                             continue
-                        
-                        # 处理编辑器点击
                         self.handle_editor_click((x, y))
                 
                 elif event.type == pygame.MOUSEMOTION:
@@ -1554,13 +1445,13 @@ class Dandelion:
                             elif self.game_rule == 3:
                                 rule = 2
                             self.set_game_rule(rule=rule)
-                        elif event.key == pygame.K_7:  # 悔棋功能
+                        elif event.key == pygame.K_7:
                             self.undo_move()
                         elif event.key == pygame.K_UP:
                             self.set_movelimit(self.movenum_limit + 8)
                         elif event.key == pygame.K_DOWN:
                             self.set_movelimit(self.movenum_limit - 8)
-                        elif event.key == pygame.K_8:  # 翻转棋盘
+                        elif event.key == pygame.K_8:
                             self.flip_board = not self.flip_board
                         elif event.key == pygame.K_9:
                             self.prompt_for_fen()
@@ -1570,13 +1461,76 @@ class Dandelion:
                             self.set_game_drawrule("COUNT")
                         elif event.key == pygame.K_p:
                             self.set_game_drawrule("WEIGHT")
-                        elif event.key == pygame.K_a:  # 新增：切换精简模式
+                        elif event.key == pygame.K_g:
+                            self.set_game_looprule("seventhree")
+                        elif event.key == pygame.K_h:
+                            self.set_game_looprule("fivetwo")
+                        elif event.key == pygame.K_j:
+                            self.set_game_looprule("twoone")
+                        elif event.key == pygame.K_k:
+                            self.set_game_looprule("repeatend")
+                        elif event.key == pygame.K_l:
+                            self.set_game_looprule("none")
+                        elif event.key == pygame.K_a:
                             self.simple_mode = not self.simple_mode
+                        elif event.key == pygame.K_w:
+                            if self.analyzing and self.selected_piece is None:
+                                with self.analysis_lock:
+                                    if not self.analysis_results:
+                                        continue
+                                    
+                                    best_move = next((r for r in self.analysis_results if r.get('order') == 0), None)
+                                    if not best_move:
+                                        best_move = self.analysis_results[0]
+                                    
+                                    pv_moves = best_move.get('pv', '').split()
+                                    if len(pv_moves) < 2:
+                                        continue
+
+                                    start_move_str = pv_moves[0]
+                                    end_move_str = pv_moves[1]
+                                
+                                sc, sr = movestr_to_pos(start_move_str)
+                                ec, er = movestr_to_pos(end_move_str)
+                                
+                                if sr is None or er is None:
+                                    continue
+
+                                piece = self.board[sr][sc]
+                                if piece == ' ' or \
+                                   (self.current_player == 'w' and piece.islower()) or \
+                                   (self.current_player == 'b' and piece.isupper()):
+                                    print(f"Engine suggested an invalid move for player {self.current_player}: moving piece '{piece}' at {start_move_str}")
+                                    continue
+                                
+                                captured_piece = self.board[er][ec] if self.board[er][ec] != ' ' else None
+                                self.board[er][ec] = self.board[sr][sc]
+                                self.board[sr][sc] = ' '
+                                
+                                self.last_move = ((sr, sc), (er, ec))
+                                self.current_movenum += 1
+                                self.move_history.append({
+                                    'start': (sr, sc), 'end': (er, ec),
+                                    'piece': self.board[er][ec], 'captured': captured_piece,
+                                    'player': self.current_player
+                                })
+                                
+                                player_before_move = self.current_player
+                                self.current_player = get_opp(self.current_player)
+                                self.selected_piece = None
+                                self.move_evaluation = None
+
+                                color = 'B' if player_before_move == 'w' else 'W'
+                                self.try_send_command(f"play {color} {start_move_str}")
+                                self.try_send_command(f"play {color} {end_move_str}")
+                                
+                                self.analysis_results.clear()
+                                if self.analyzing:
+                                    self.try_send_command(GTP_COMMAND_ANALYZE)
                     elif self.mode == "editor":
                         if event.key == pygame.K_1:
                             self.swap_player()
 
-            # 根据当前模式绘制界面
             if self.mode == "main":
                 self.draw_main_board()
             elif self.mode == "editor":
