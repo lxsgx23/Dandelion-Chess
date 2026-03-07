@@ -256,6 +256,8 @@ class Dandelion:
 
         # 初始化需要在加载资源前定义的属性
         self.eval_images = {} # To store evaluation images
+        # ========== 新增：字体缓存 ==========
+        self.font_cache = {}
 
         # 计算动态尺寸
         self.calculate_sizes()
@@ -368,6 +370,38 @@ class Dandelion:
             except pygame.error:
                 self.eval_images[name] = None
                 print(f"警告: 走法评估图片加载失败: resource/pieces/{name}.png")
+
+    # ========== 新增：安全获取字体的方法 ==========
+    def get_font(self, name, size, bold=False):
+        """尝试多种方式获取字体，避免SysFont初始化失败"""
+        key = (name, size, bold)
+        if key in self.font_cache:
+            return self.font_cache[key]
+
+        font = None
+        # 先尝试用SysFont（可能触发异常）
+        try:
+            font = pygame.font.SysFont(name, size, bold=bold)
+        except Exception:
+            pass
+
+        # 如果失败，尝试直接加载simhei.ttf文件（常见路径）
+        if font is None:
+            try:
+                font = pygame.font.Font("C:/Windows/Fonts/simhei.ttf", size)
+            except Exception:
+                pass
+
+        # 最后回退到默认字体
+        if font is None:
+            try:
+                font = pygame.font.Font(None, size)
+            except Exception as e:
+                # 极罕见情况：连默认字体都失败，则创建一个最简单的字体（Pygame应能处理）
+                font = pygame.font.Font(None, size)
+
+        self.font_cache[key] = font
+        return font
 
     def start_katago(self):
         """启动KataGo进程"""
@@ -813,7 +847,8 @@ class Dandelion:
         pygame.draw.rect(self.screen, (200, 200, 200), (dialog_x, dialog_y, dialog_width, dialog_height))
         pygame.draw.rect(self.screen, (100, 100, 100), (dialog_x, dialog_y, dialog_width, dialog_height), 2)
 
-        font = pygame.font.SysFont(FONT_NAME, 20)
+        # 使用 get_font 替代 SysFont
+        font = self.get_font(FONT_NAME, 20)
         error_text = font.render(self.error_message, True, (0, 0, 0))
         self.screen.blit(error_text, (dialog_x + 20, dialog_y + 30))
 
@@ -821,7 +856,7 @@ class Dandelion:
         pygame.draw.rect(self.screen, (150, 150, 150), button_rect)
         pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
 
-        button_font = pygame.font.SysFont(FONT_NAME, 18)
+        button_font = self.get_font(FONT_NAME, 18)  # 修改
         button_text = button_font.render("确定", True, (0, 0, 0))
         self.screen.blit(button_text, (button_rect.centerx - 20, button_rect.centery - 10))
 
@@ -832,7 +867,7 @@ class Dandelion:
         pygame.draw.rect(self.screen, (240, 240, 240), 
                          (panel_x, 0, self.sidebar_width, panel_height))
 
-        font = pygame.font.SysFont(FONT_NAME, 16)
+        font = self.get_font(FONT_NAME, 16)  # 修改
         text = font.render("选点列表", True, (0, 0, 0))
         self.screen.blit(text, (panel_x + 10, 10))
 
@@ -851,12 +886,12 @@ class Dandelion:
 
         situation_text, text_color, score_text, score_color = self.get_situation_text()
 
-        font = pygame.font.SysFont(FONT_NAME, 32, bold=False)
+        font = self.get_font(FONT_NAME, 32, bold=False)  # 修改
         score_surf = font.render(score_text, True, score_color)
         score_rect = score_surf.get_rect(center=(panel_x + 50, situation_y + 40))
         self.screen.blit(score_surf, score_rect)
 
-        font = pygame.font.SysFont(FONT_NAME, 24, bold=True)
+        font = self.get_font(FONT_NAME, 24, bold=True)  # 修改
         text_surf = font.render(situation_text, True, text_color)
         text_rect = text_surf.get_rect(center=(panel_x + self.sidebar_width // 2, situation_y + 40))
         self.screen.blit(text_surf, text_rect)
@@ -924,7 +959,7 @@ class Dandelion:
         x0 = self.announce_width + self.board_width
         pygame.draw.rect(self.screen, (160, 160, 160),
                         (x0, y0, self.sidebar_width, 250))
-        font = pygame.font.SysFont(FONT_NAME, 18)
+        font = self.get_font(FONT_NAME, 18)  # 修改
 
         mode_color = (0, 200, 0) if self.simple_mode else (200, 0, 0)
         mode_text = "精简模式" if self.simple_mode else "专业模式"
@@ -983,11 +1018,11 @@ class Dandelion:
         pygame.draw.rect(self.screen, (255, 255, 255),
                         (console_x, console_top, self.sidebar_width, self.gtp_console_height))
 
-        font = pygame.font.SysFont(FONT_NAME, 20)
+        font = self.get_font(FONT_NAME, 20)  # 修改
         title = font.render("GTP 信息", True, (0, 0, 0))
         self.screen.blit(title, (console_x + 10, console_top - 30))
 
-        font = pygame.font.SysFont(FONT_NAME, GTP_FONT_SIZE)
+        font = self.get_font(FONT_NAME, GTP_FONT_SIZE)  # 修改
         y_increase = GTP_FONT_SIZE + 2
         y_start = console_top + 30 - self.scroll_offset * y_increase
         with self.analysis_lock:
@@ -1013,7 +1048,8 @@ class Dandelion:
 
     def draw_text(self, text, pos, anchor='topleft', color=(0, 0, 0), bg_color=None, font_size=20, bold=False, font_name=FONT_NAME):
         """改进的文字绘制支持多行和对齐"""
-        font = pygame.font.SysFont(font_name, int(FONT_SCALE * font_size), bold=bold)
+        # 使用 get_font 替代 SysFont
+        font = self.get_font(font_name, int(FONT_SCALE * font_size), bold=bold)
         lines = text.split('\n')
         
         is_w_anchor = anchor == 'w'
