@@ -11,3 +11,6 @@ See Katago for Animal Chess at [https://github.com/hzyhhzy](https://github.com/h
 
 ## Mini_Xiangqi
 A simple interface designed to be modified for other chess variants,can also apply Fairy-Stockfish 14 to analyze games.
+
+## Xionghan
+A simple interface based on Dandelion-Chess,can also apply Katago to analyze Xionghan Chess.
