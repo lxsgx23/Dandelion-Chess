@@ -1,482 +1,473 @@
 # main.py
-import pygame
+import tkinter as tk
+from tkinter import simpledialog
+from tkinter import font as tkfont  # 新增：导入字体模块
 import re
 import pyperclip
-import tkinter as tk
-from tkinter import filedialog
+import os
+from PIL import Image, ImageTk
 
+# 从新建的tools模块中导入所有需要的类、函数和常量
 from tools import (
-    ChessBoard, EngineHandler, UILayout, PGNHandler,
-    get_fen_from_input, show_settings_window, load_settings,
-    load_and_scale_assets, draw_board, draw_arrow,
-    FEN_INITIAL, COLORS, BOARD_COLS, BOARD_ROWS
+    ChessBoard, EngineHandler, show_settings_window, load_settings,
+    FEN_INITIAL, COLORS, BOARD_COLS, BOARD_ROWS,
+    PIECES_DIR, DONATE_IMAGE_PATH
 )
 
-def draw_pgn_panel(surface, layout, pgn_handler, font, pgn_move_rects, scroll_y):
-    """在给定的surface上绘制PGN内容和滚动条"""
-    pgn_viewport_rect = layout.pgn_view_rect
-    
-    # 估算内容的总高度，以便创建足够大的画布
-    estimated_height = len(str(pgn_handler.export_pgn_string())) * 2 if pgn_handler else pgn_viewport_rect.height
+def rgb_to_hex(rgb):
+    """辅助函数：将RGB元组转换为Tkinter使用的Hex颜色格式"""
+    if len(rgb) >= 3:
+        return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+    return "#000000"
 
-    pgn_content_surface = pygame.Surface((layout.pgn_panel_width, max(pgn_viewport_rect.height, int(estimated_height))), pygame.SRCALPHA)
-
-    if not pgn_handler:
-        # 如果没有棋谱，直接返回，因为背景已在主循环中画好。
-        return 0
-
-    x_margin, y_margin = 10, 15
-    x, y = x_margin, y_margin
-    line_height = font.get_linesize() + 8
-    indent_size = 25
-    pgn_move_rects.clear()
-
-    def draw_node_recursive(node, move_number, is_black_move, indent_level):
-        nonlocal x, y
-        def wrap_and_render_text(text, text_color, base_x, width_limit, node_ref=None, is_move=False):
-            nonlocal x, y
-            words = text.split(' ')
-            current_line = ""
-            for word in words:
-                test_line = current_line + word + ' '
-                if font.size(test_line)[0] > width_limit:
-                    text_surface = font.render(current_line, True, text_color)
-                    pgn_content_surface.blit(text_surface, (x, y))
-                    y += line_height
-                    x = base_x
-                    current_line = word + ' '
-                else:
-                    current_line = test_line
-            text_surface = font.render(current_line.strip(), True, text_color)
-            if node_ref and pgn_handler.current_node == node_ref:
-                bg_rect = pygame.Rect(x, y, text_surface.get_width(), text_surface.get_height())
-                pygame.draw.rect(pgn_content_surface, (255, 165, 0), bg_rect)
-            pgn_content_surface.blit(text_surface, (x, y))
-            if is_move and node_ref:
-                move_rect = pygame.Rect(x, y, text_surface.get_width(), text_surface.get_height())
-                pgn_move_rects.append((move_rect, node_ref))
-            x += text_surface.get_width()
-        if node.move_notation:
-            move_text = f"{move_number}. " if not is_black_move else ""
-            move_text += f"{node.move_notation}"
-            render_text_surface = font.render(move_text, True, COLORS['menu_text'])
-            if x + render_text_surface.get_width() > layout.pgn_panel_width - x_margin:
-                y += line_height
-                x = x_margin + indent_level * indent_size
-            wrap_and_render_text(move_text, COLORS['menu_text'], x, layout.pgn_panel_width - x - x_margin, node_ref=node, is_move=True)
-            x += font.size(' ')[0]
-            is_black_move = not is_black_move
-            if not is_black_move:
-                move_number += 1
-        if node.comment:
-            y += line_height
-            comment_x = x_margin + (indent_level + 1) * indent_size
-            x = comment_x
-            wrap_and_render_text(f"{{{node.comment}}}", (210, 210, 210), comment_x, layout.pgn_panel_width - comment_x - x_margin)
-            y += line_height
-            x = x_margin + indent_level * indent_size
-        if len(node.children) > 1:
-            mainline_end_x, mainline_end_y = x, y
-            for i, child in enumerate(node.children):
-                if i > 0:
-                    y = mainline_end_y + line_height if mainline_end_y > y else y + line_height
-                    x = x_margin + indent_level * indent_size
-                    wrap_and_render_text("( ", COLORS['menu_text'], x, layout.pgn_panel_width - x_margin)
-                    draw_node_recursive(child, move_number, is_black_move, indent_level + 1)
-                    wrap_and_render_text(") ", COLORS['menu_text'], x, layout.pgn_panel_width - x_margin)
-        if node.children:
-            draw_node_recursive(node.children[0], move_number, is_black_move, indent_level)
-
-    draw_node_recursive(pgn_handler.root, 1, pgn_handler.root.fen.split()[1] == 'b', 0)
-    content_height = y + line_height
-
-    for i, (rect, node) in enumerate(pgn_move_rects):
-        rect_on_screen = rect.copy()
-        rect_on_screen.y = rect.y - scroll_y + pgn_viewport_rect.y
-        pgn_move_rects[i] = (rect_on_screen, node)
-
-    # 将只包含文字的透明画布，“贴”到主屏幕上
-    surface.blit(pgn_content_surface, pgn_viewport_rect.topleft, (0, scroll_y, pgn_viewport_rect.width, pgn_viewport_rect.height))
-
-    # 滚动条绘制逻辑
-    visible_height = pgn_viewport_rect.height
-    if content_height > visible_height:
-        track_width = 12
-        track_rect = pygame.Rect(layout.pgn_panel_width - track_width, pgn_viewport_rect.y, track_width, visible_height)
-        pygame.draw.rect(surface, (40, 40, 40), track_rect)
-        handle_height = max(20, visible_height * (visible_height / content_height))
-        scrollable_range = content_height - visible_height
-        scroll_ratio = scroll_y / scrollable_range if scrollable_range > 0 else 0
-        handle_y = pgn_viewport_rect.y + scroll_ratio * (visible_height - handle_height)
-        handle_rect = pygame.Rect(track_rect.x, handle_y, track_width, handle_height)
-        pygame.draw.rect(surface, (120, 120, 120), handle_rect)
-    return content_height
-
-
-def main():
-    """主程序入口和游戏循环"""
-    pygame.init()
-
-    initial_width, initial_height = 850, 600
-    screen = pygame.display.set_mode((initial_width, initial_height), pygame.RESIZABLE)
-    pygame.display.set_caption("Dandelion - 迷你中国象棋")
-    layout = UILayout(initial_width, initial_height)
-    original_pieces, original_donate_img = load_and_scale_assets(layout)
-    if not layout.scaled_pieces:
-        print("错误：棋子图片加载失败，请检查 'resource/pieces' 文件夹。")
-        return
-    chess_board = ChessBoard()
-    engine_settings = load_settings()
-    engine = EngineHandler(settings=engine_settings)
-    analysis_mode = True 
-    multipv_mode = False
-    if engine.engine and analysis_mode:
-        engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-    selected_pos, last_move, history, analysis_lines = None, None, [chess_board.get_fen()], []
-    board_flipped, show_move_markers, active_menu = False, True, None
-    pgn_creation_mode, pgn_view_mode = False, False
-    pgn_record_after_load = False
-    pgn_handler = None
-    pgn_move_rects = []
-    comment_input_active, comment_text = False, ""
-    pgn_scroll_y = 0
-    pgn_content_height = 0
-    scrollbar_dragging = False
-    scrollbar_drag_offset_y = 0
-    dropdown_items = {
-        '局面': [('复制Fen', 'copy_fen'), ('粘贴Fen', 'paste_fen'), ('制谱', 'toggle_pgn_creation')],
-        '显示': [('翻转棋盘', 'flip_board'), ('显示走子', 'toggle_move_markers')],
-        '设置': [('引擎设置', 'engine_settings'), ('加载棋谱', 'load_pgn')],
-    }
-    dropdown_rects = {}
-    running = True
-    clock = pygame.time.Clock()
-
-    while running:
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_pressed = pygame.mouse.get_pressed()
-
-        if scrollbar_dragging:
-            if mouse_pressed[0] and layout.pgn_view_rect:
-                visible_height = layout.pgn_view_rect.height
-                if pgn_content_height > visible_height:
-                    handle_height = max(20, visible_height * (visible_height / pgn_content_height))
-                    track_height = visible_height - handle_height
-                    relative_y = mouse_pos[1] - layout.pgn_view_rect.y - scrollbar_drag_offset_y
-                    scroll_ratio = max(0, min(1, relative_y / track_height if track_height > 0 else 0))
-                    max_scroll = pgn_content_height - visible_height
-                    pgn_scroll_y = scroll_ratio * max_scroll
-            else:
-                scrollbar_dragging = False
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            
-            elif event.type == pygame.VIDEORESIZE:
-                width, height = event.w, event.h
-                screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
-                layout.recalculate(width, height, pgn_mode=(pgn_creation_mode or pgn_view_mode))
-                layout.scale_images(original_pieces, original_donate_img)
-
-            elif event.type == pygame.KEYDOWN:
-                if comment_input_active:
-                    if event.key == pygame.K_RETURN:
-                        if pgn_handler:
-                            pgn_handler.add_comment_to_current_node(comment_text)
-                        comment_input_active = False
-                    elif event.key == pygame.K_BACKSPACE:
-                        comment_text = comment_text[:-1]
-                    else:
-                        comment_text += event.unicode
-            
-            elif event.type == pygame.MOUSEWHEEL:
-                if layout.pgn_view_rect and layout.pgn_view_rect.collidepoint(mouse_pos):
-                    pgn_scroll_y -= event.y * 30
-                    visible_height = layout.pgn_view_rect.height
-                    max_scroll = max(0, pgn_content_height - visible_height)
-                    pgn_scroll_y = max(0, min(pgn_scroll_y, max_scroll))
-
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button != 1: continue
-                x, y = event.pos
-
-                clicked_on_scrollbar = False
-                if (pgn_creation_mode or pgn_view_mode) and layout.pgn_view_rect:
-                    visible_height = layout.pgn_view_rect.height
-                    if pgn_content_height > visible_height:
-                        track_width = 12
-                        scrollable_range = pgn_content_height - visible_height
-                        scroll_ratio = pgn_scroll_y / scrollable_range if scrollable_range > 0 else 0
-                        handle_height = max(20, visible_height * (visible_height / pgn_content_height))
-                        handle_y = layout.pgn_view_rect.y + scroll_ratio * (visible_height - handle_height)
-                        handle_rect = pygame.Rect(layout.pgn_panel_width - track_width, handle_y, track_width, handle_height)
-                        if handle_rect.collidepoint(x, y):
-                            scrollbar_dragging = True
-                            scrollbar_drag_offset_y = y - handle_rect.y
-                            clicked_on_scrollbar = True
-                
-                if clicked_on_scrollbar: continue
-                
-                clicked_on_menu = False
-                if active_menu and active_menu in dropdown_rects:
-                    for item_text, rect in dropdown_rects[active_menu].items():
-                        if rect.collidepoint(x, y):
-                            action = dropdown_items[active_menu][list(dropdown_rects[active_menu].keys()).index(item_text)][1]
-                            if action == 'copy_fen': pyperclip.copy(chess_board.get_fen())
-                            elif action == 'paste_fen':
-                                fen = get_fen_from_input()
-                                if fen:
-                                    try:
-                                        chess_board.parse_fen(fen)
-                                        history, last_move, analysis_lines = [chess_board.get_fen()], None, []
-                                        if pgn_creation_mode: pgn_handler = PGNHandler(fen)
-                                        if engine.engine and analysis_mode:
-                                            engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                                    except Exception as e: print(f"FEN解析错误: {e}")
-                            elif action == 'flip_board': board_flipped = not board_flipped
-                            elif action == 'toggle_move_markers': show_move_markers = not show_move_markers
-                            elif action == 'engine_settings': show_settings_window(engine, chess_board, analysis_mode)
-                            elif action == 'toggle_pgn_creation':
-                                if pgn_view_mode:
-                                    pgn_record_after_load = not pgn_record_after_load
-                                else:
-                                    pgn_creation_mode = not pgn_creation_mode
-                                    pgn_view_mode = False
-                                    pgn_record_after_load = False
-                                    pgn_scroll_y = 0
-                                    if pgn_creation_mode:
-                                        pgn_handler = PGNHandler(chess_board.get_fen())
-                                    else:
-                                        pgn_handler = None
-                                    layout.recalculate(screen.get_width(), screen.get_height(), pgn_mode=pgn_creation_mode)
-                            elif action == 'load_pgn':
-                                root = tk.Tk(); root.withdraw()
-                                filepath = filedialog.askopenfilename(filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")])
-                                if filepath:
-                                    try:
-                                        with open(filepath, 'r', encoding='utf-8') as f: pgn_content = f.read()
-                                        pgn_handler = PGNHandler()
-                                        pgn_handler.load_from_string(pgn_content)
-                                        chess_board.parse_fen(pgn_handler.root.fen)
-                                        pgn_creation_mode, pgn_view_mode = False, True
-                                        pgn_record_after_load = False
-                                        pgn_scroll_y = 0
-                                        layout.recalculate(screen.get_width(), screen.get_height(), pgn_mode=True)
-                                    except Exception as e: print(f"加载PGN时出错: {e}")
-                                root.destroy()
-                            active_menu = None; clicked_on_menu = True; break
-                if not clicked_on_menu:
-                    new_active_menu = None
-                    for name, rect in layout.menus.items():
-                        if rect.collidepoint(x, y):
-                            if name == '新局':
-                                chess_board = ChessBoard(FEN_INITIAL)
-                                history, last_move, selected_pos, analysis_lines = [chess_board.get_fen()], None, None, []
-                                if pgn_creation_mode: pgn_handler = PGNHandler(FEN_INITIAL)
-                                if engine.engine and analysis_mode:
-                                    engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                            elif name == '悔棋':
-                                if (pgn_creation_mode or pgn_view_mode) and pgn_handler and pgn_handler.current_node.parent:
-                                    pgn_handler.go_back()
-                                    chess_board.parse_fen(pgn_handler.current_node.fen)
-                                    analysis_lines.clear()
-                                    if engine.engine and analysis_mode:
-                                        engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                                elif not pgn_creation_mode and not pgn_view_mode and len(history) > 1:
-                                    history.pop()
-                                    chess_board.parse_fen(history[-1])
-                                    analysis_lines.clear()
-                                    if engine.engine and analysis_mode:
-                                        engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                                    selected_pos, last_move = None, None
-                            elif name == '多变':
-                                multipv_mode = not multipv_mode
-                                if engine.engine:
-                                    engine.send_command(f"setoption name MultiPV value {2 if multipv_mode else 1}")
-                                    if analysis_mode:
-                                        analysis_lines.clear(); engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                            elif name in dropdown_items: new_active_menu = name if active_menu != name else None
-                            clicked_on_menu = True; break
-                    active_menu = new_active_menu
-                if clicked_on_menu: continue
-                comment_input_active = False 
-                if pgn_creation_mode or pgn_view_mode:
-                    for rect, node in pgn_move_rects:
-                        if rect.collidepoint(x, y):
-                            pgn_handler.current_node = node
-                            chess_board.parse_fen(node.fen)
-                            last_move, analysis_lines = None, []
-                            if engine.engine and analysis_mode:
-                                engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                            break
-                    is_editable_mode = pgn_creation_mode or (pgn_view_mode and pgn_record_after_load)
-                    if is_editable_mode:
-                        if layout.export_pgn_button and layout.export_pgn_button.collidepoint(x,y):
-                            root = tk.Tk(); root.withdraw()
-                            filepath = filedialog.asksaveasfilename(defaultextension=".pgn", filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")])
-                            if filepath:
-                                pgn_string = pgn_handler.export_pgn_string()
-                                with open(filepath, 'w', encoding='utf-8') as f: f.write(pgn_string)
-                            root.destroy()
-                        elif layout.comment_box and layout.comment_box.collidepoint(x,y):
-                            comment_input_active = True
-                            comment_text = pgn_handler.current_node.comment
-                board_rect = pygame.Rect(layout.board_x_start, layout.menu_height, layout.board_size, layout.board_size)
-                if board_rect.collidepoint(x, y):
-                    cx = (x - layout.board_x_start) // layout.cell_size; cy = (y - layout.menu_height) // layout.cell_size
-                    if board_flipped: cx, cy = BOARD_COLS - 1 - cx, BOARD_ROWS - 1 - cy
-                    if selected_pos:
-                        if selected_pos == (cx, cy): selected_pos = None
-                        elif chess_board.board[selected_pos[0]][selected_pos[1]]:
-                            turn_before_move = chess_board.turn
-                            from_pos_before_move, to_pos_before_move = selected_pos, (cx, cy)
-                            chess_board.move_piece(selected_pos, (cx, cy))
-                            last_move = (from_pos_before_move, to_pos_before_move)
-                            if pgn_creation_mode or (pgn_view_mode and pgn_record_after_load):
-                                pgn_handler.add_move(from_pos_before_move, to_pos_before_move, chess_board.get_fen(), turn_before_move)
-                            elif not (pgn_creation_mode or pgn_view_mode):
-                                history.append(chess_board.get_fen())
-                            analysis_lines.clear()
-                            if analysis_mode and engine.engine:
-                                engine.send_command("stop"); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                            selected_pos = None
-                        else: selected_pos = None
-                    elif chess_board.board[cx][cy]: selected_pos = (cx, cy)
-                elif layout.analysis_button and layout.analysis_button.collidepoint(x, y):
-                    analysis_mode = not analysis_mode
-                    if analysis_mode and engine.engine:
-                        analysis_lines.clear(); engine.send_command(f"position fen {chess_board.get_fen()}"); engine.send_command("go infinite")
-                    else:
-                        if engine.engine: engine.send_command("stop")
-                        analysis_lines.clear()
+class ChessApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Dandelion - 迷你中国象棋")
+        self.root.geometry("850x600")
+        self.root.minsize(600, 400)
         
-        if engine.engine and analysis_mode:
-            while not engine.queue.empty():
-                line = engine.queue.get(); parts = line.split()
+        # 初始化引擎和棋盘
+        self.engine_settings = load_settings()
+        self.engine = EngineHandler(settings=self.engine_settings)
+        self.chess_board = ChessBoard()
+        
+        # 游戏状态变量
+        self.analysis_mode = True
+        self.multipv_mode = False
+        self.selected_pos = None
+        self.last_move = None
+        self.history =[self.chess_board.get_fen()]
+        self.analysis_lines =[]
+        self.board_flipped = False
+        self.show_move_markers = True
+        
+        # 图像资源
+        self.original_pieces = {}
+        self.scaled_pieces = {}
+        self.original_donate_img = None
+        self.tk_donate_img = None
+        
+        self.load_assets_unscaled()
+        self.setup_ui()
+        
+        # 启动引擎分析
+        if self.engine.engine and self.analysis_mode:
+            self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+            self.engine.send_command("go infinite")
+            
+        # 开启定时器刷新引擎返回信息
+        self.root.after(100, self.update_engine_info)
+
+    def load_assets_unscaled(self):
+        """预先加载原始图片资源，方便之后无损缩放"""
+        piece_types =['K', 'N', 'C', 'R', 'P']
+        for color in ['r', 'b']:
+            for piece_type in piece_types:
+                key = f'{color}{piece_type}'
+                filepath = os.path.join(PIECES_DIR, f'{color}{piece_type.upper()}.png')
+                if not os.path.exists(filepath):
+                    filepath = os.path.join(PIECES_DIR, f'{color}{piece_type.lower()}.png')
+                if os.path.exists(filepath):
+                    try:
+                        self.original_pieces[key] = Image.open(filepath).convert("RGBA")
+                    except Exception as e:
+                        print(f"警告: 无法加载图片 '{filepath}': {e}")
+                else:
+                    print(f"警告: 找不到棋子图片 '{key}' for path '{filepath}'")
+                    
+        if os.path.exists(DONATE_IMAGE_PATH):
+            try:
+                self.original_donate_img = Image.open(DONATE_IMAGE_PATH)
+            except Exception as e:
+                print(f"警告: 无法加载赞赏图片 '{DONATE_IMAGE_PATH}': {e}")
+
+    def setup_ui(self):
+        """配置Tkinter全部UI组件"""
+        # --- 字体定义（支持动态缩放） ---
+        self.menu_font = tkfont.Font(family="SimHei", size=11)
+        self.btn_font = tkfont.Font(family="SimHei", size=12, weight="bold")
+        self.info_font = tkfont.Font(family="SimHei", size=11)
+
+        # --- 顶部原生菜单栏 ---
+        self.menubar = tk.Menu(self.root, font=self.menu_font)
+        
+        self.menubar.add_command(label="新局", command=self.new_game)
+        
+        position_menu = tk.Menu(self.menubar, tearoff=0, font=self.menu_font)
+        position_menu.add_command(label="复制Fen", command=self.copy_fen)
+        position_menu.add_command(label="粘贴Fen", command=self.paste_fen)
+        self.menubar.add_cascade(label="局面", menu=position_menu)
+        
+        self.menubar.add_command(label="悔棋", command=self.undo_move)
+        
+        self.display_menu = tk.Menu(self.menubar, tearoff=0, font=self.menu_font)
+        self.flip_var = tk.BooleanVar(value=self.board_flipped)
+        self.display_menu.add_checkbutton(label="翻转棋盘", variable=self.flip_var, command=self.toggle_flip)
+        self.markers_var = tk.BooleanVar(value=self.show_move_markers)
+        self.display_menu.add_checkbutton(label="显示走子", variable=self.markers_var, command=self.toggle_markers)
+        self.menubar.add_cascade(label="显示", menu=self.display_menu)
+        
+        self.multipv_var = tk.BooleanVar(value=self.multipv_mode)
+        self.menubar.add_checkbutton(label="多变", variable=self.multipv_var, command=self.toggle_multipv)
+        
+        self.menubar.add_command(label="设置", command=self.open_settings)
+        
+        self.root.config(menu=self.menubar)
+        
+        # --- 页面主体分割 ---
+        self.main_frame = tk.Frame(self.root, bg=rgb_to_hex(COLORS["bg"]))
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 左侧 棋盘画布 (占比 72%)
+        self.board_canvas = tk.Canvas(self.main_frame, bg=rgb_to_hex(COLORS["bg"]), highlightthickness=0)
+        self.board_canvas.place(relx=0, rely=0, relwidth=0.72, relheight=1.0)
+        
+        # 右侧 信息面板 (占比 28%)
+        self.info_frame = tk.Frame(self.main_frame, bg=rgb_to_hex(COLORS["panel"]))
+        self.info_frame.place(relx=0.72, rely=0, relwidth=0.28, relheight=1.0)
+        
+        self.analysis_btn = tk.Button(self.info_frame, text="分析: ON", bg=rgb_to_hex(COLORS["button"]), fg="white", 
+                                      command=self.toggle_analysis, font=self.btn_font)
+        self.analysis_btn.pack(pady=20, padx=20, fill=tk.X)
+        
+        self.info_text = tk.Text(self.info_frame, bg=rgb_to_hex(COLORS["panel"]), fg="black", font=self.info_font,
+                                 wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT)
+        self.info_text.pack(fill=tk.BOTH, expand=True, padx=20)
+        
+        self.donate_canvas = tk.Canvas(self.info_frame, bg=rgb_to_hex(COLORS["panel"]), highlightthickness=0)
+        self.donate_canvas.pack(side=tk.BOTTOM, fill=tk.X, pady=15, padx=15)
+        
+        # 绑定重绘事件和鼠标点击
+        self.board_canvas.bind("<Configure>", self.on_canvas_resize)
+        self.board_canvas.bind("<Button-1>", self.on_board_click)
+        
+        self.update_info_panel()
+
+    def on_canvas_resize(self, event):
+        """窗口大小变更时触发，重新计算单元格和缩放图像"""
+        if not hasattr(self, 'last_size'):
+            self.last_size = (0, 0)
+        if self.last_size == (event.width, event.height):
+            return
+        self.last_size = (event.width, event.height)
+        
+        width = event.width
+        height = event.height
+        
+        self.cell_size = int(min(width / BOARD_COLS, height / BOARD_ROWS))
+        if self.cell_size <= 0: return
+        
+        # --- 动态调整字体大小 ---
+        # 基于 cell_size 的缩放比例计算(初始 600 高度下 cell_size 约为 600/7 ≈ 85)
+        scale = self.cell_size / 85.0
+        new_text_size = max(11, int(11 * scale))
+        new_btn_size = max(12, int(12 * scale))
+        new_menu_size = max(11, int(11 * scale))
+        
+        # 修改全局字体的 size ，对应的UI组件会自动响应并刷新
+        self.info_font.configure(size=new_text_size)
+        self.btn_font.configure(size=new_btn_size)
+        self.menu_font.configure(size=new_menu_size)
+        
+        self.board_size_x = self.cell_size * BOARD_COLS
+        self.board_size_y = self.cell_size * BOARD_ROWS
+        
+        self.offset_x = (width - self.board_size_x) // 2
+        self.offset_y = (height - self.board_size_y) // 2
+        
+        self.scaled_pieces = {}
+        for k, v in self.original_pieces.items():
+            resized = v.resize((self.cell_size, self.cell_size), Image.Resampling.LANCZOS)
+            self.scaled_pieces[k] = ImageTk.PhotoImage(resized)
+            
+        self.redraw_board()
+        self.root.after(100, self.scale_donate_image) # 延迟右侧加载
+
+    def scale_donate_image(self):
+        """重新缩放并绘制赞助图片"""
+        if self.original_donate_img:
+            self.info_frame.update_idletasks()
+            info_width = self.info_frame.winfo_width()
+            if info_width > 10:
+                img_w, img_h = self.original_donate_img.size
+                ratio = img_h / img_w
+                target_width = int(info_width * 0.6)
+                target_height = int(target_width * ratio)
+                if target_width > 0 and target_height > 0:
+                    resized = self.original_donate_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                    self.tk_donate_img = ImageTk.PhotoImage(resized)
+                    self.donate_canvas.config(height=target_height)
+                    self.donate_canvas.delete("all")
+                    self.donate_canvas.create_image(info_width//2, target_height//2, image=self.tk_donate_img, anchor=tk.CENTER)
+
+    def redraw_board(self):
+        """重新绘制Canvas上的网格、选中框和箭头等"""
+        self.board_canvas.delete("all")
+        if not hasattr(self, 'cell_size') or self.cell_size <= 0: return
+        
+        center_offset = self.cell_size // 2
+        
+        # 绘制棋盘竖线与横线
+        for i in range(BOARD_COLS):
+            x = self.offset_x + i * self.cell_size + center_offset
+            y1 = self.offset_y + center_offset
+            y2 = self.offset_y + self.board_size_y - center_offset
+            self.board_canvas.create_line(x, y1, x, y2, fill=rgb_to_hex(COLORS["line"]), width=2)
+            
+        for i in range(BOARD_ROWS):
+            y = self.offset_y + i * self.cell_size + center_offset
+            x1 = self.offset_x + center_offset
+            x2 = self.offset_x + self.board_size_x - center_offset
+            self.board_canvas.create_line(x1, y, x2, y, fill=rgb_to_hex(COLORS["line"]), width=2)
+            
+        # 绘制九宫对角线
+        palace_cols =[2, 4]
+        x1 = self.offset_x + palace_cols[0] * self.cell_size + center_offset
+        y1 = self.offset_y + center_offset
+        x2 = self.offset_x + palace_cols[1] * self.cell_size + center_offset
+        y2 = self.offset_y + 2 * self.cell_size + center_offset
+        self.board_canvas.create_line(x1, y1, x2, y2, fill=rgb_to_hex(COLORS["line"]), width=2)
+        self.board_canvas.create_line(x2, y1, x1, y2, fill=rgb_to_hex(COLORS["line"]), width=2)
+        
+        y3 = self.offset_y + (BOARD_ROWS-3) * self.cell_size + center_offset
+        y4 = self.offset_y + (BOARD_ROWS-1) * self.cell_size + center_offset
+        self.board_canvas.create_line(x1, y3, x2, y4, fill=rgb_to_hex(COLORS["line"]), width=2)
+        self.board_canvas.create_line(x2, y3, x1, y4, fill=rgb_to_hex(COLORS["line"]), width=2)
+        
+        # 绘制上一步提示框
+        if self.show_move_markers and self.last_move:
+            from_pos, to_pos = self.last_move
+            self.draw_highlight(from_pos, "#FFFF00")
+            self.draw_highlight(to_pos, "#FFFF00")
+            
+        # 绘制选中框
+        if self.selected_pos:
+            self.draw_highlight(self.selected_pos, "#00FF00")
+            
+        # 绘制棋子
+        for y_idx in range(BOARD_ROWS):
+            for x_idx in range(BOARD_COLS):
+                piece = self.chess_board.board[x_idx][y_idx]
+                if piece and piece in self.scaled_pieces:
+                    draw_x, draw_y = (BOARD_COLS - 1 - x_idx, BOARD_ROWS - 1 - y_idx) if self.board_flipped else (x_idx, y_idx)
+                    px = self.offset_x + draw_x * self.cell_size
+                    py = self.offset_y + draw_y * self.cell_size
+                    self.board_canvas.create_image(px, py, image=self.scaled_pieces[piece], anchor=tk.NW)
+                    
+        # 绘制引擎箭头
+        if self.analysis_mode:
+            for i, analysis in enumerate(self.analysis_lines):
+                if analysis.get('bestmove'):
+                    match = re.match(r'^([a-g])([1-7])([a-g])([1-7])$', analysis['bestmove'])
+                    if match:
+                        fc, fr, tc, tr = match.groups()
+                        x1_arrow, y1_arrow = ord(fc) - ord('a'), BOARD_ROWS - int(fr)
+                        x2_arrow, y2_arrow = ord(tc) - ord('a'), BOARD_ROWS - int(tr)
+                        color = "#FF0000" if i == 0 else "#0064FF"
+                        self.draw_arrow((x1_arrow, y1_arrow), (x2_arrow, y2_arrow), color)
+
+    def draw_highlight(self, pos, color):
+        """以边框模式标记棋格"""
+        x, y = pos
+        if self.board_flipped:
+            x, y = BOARD_COLS - 1 - x, BOARD_ROWS - 1 - y
+        px = self.offset_x + x * self.cell_size
+        py = self.offset_y + y * self.cell_size
+        self.board_canvas.create_rectangle(px+2, py+2, px+self.cell_size-2, py+self.cell_size-2, outline=color, width=4)
+
+    def draw_arrow(self, start, end, color):
+        """绘制带箭头的线段"""
+        x1, y1 = start
+        x2, y2 = end
+        if self.board_flipped:
+            x1, y1 = BOARD_COLS - 1 - x1, BOARD_ROWS - 1 - y1
+            x2, y2 = BOARD_COLS - 1 - x2, BOARD_ROWS - 1 - y2
+            
+        center = self.cell_size // 2
+        sx = self.offset_x + x1 * self.cell_size + center
+        sy = self.offset_y + y1 * self.cell_size + center
+        ex = self.offset_x + x2 * self.cell_size + center
+        ey = self.offset_y + y2 * self.cell_size + center
+        self.board_canvas.create_line(sx, sy, ex, ey, fill=color, width=5, arrow=tk.LAST, arrowshape=(16, 20, 6))
+
+    def on_board_click(self, event):
+        """处理棋盘鼠标点击逻辑"""
+        x = event.x - getattr(self, 'offset_x', 0)
+        y = event.y - getattr(self, 'offset_y', 0)
+        
+        if not hasattr(self, 'cell_size') or self.cell_size <= 0: return
+        
+        if 0 <= x < self.board_size_x and 0 <= y < self.board_size_y:
+            cx = int(x // self.cell_size)
+            cy = int(y // self.cell_size)
+            
+            if self.board_flipped:
+                cx, cy = BOARD_COLS - 1 - cx, BOARD_ROWS - 1 - cy
+                
+            if self.selected_pos:
+                if self.selected_pos == (cx, cy):
+                    self.selected_pos = None
+                elif self.chess_board.board[self.selected_pos[0]][self.selected_pos[1]]:
+                    self.last_move = (self.selected_pos, (cx, cy))
+                    self.chess_board.move_piece(self.selected_pos, (cx, cy))
+                    self.history.append(self.chess_board.get_fen())
+                    self.analysis_lines.clear()
+                    if self.analysis_mode and self.engine.engine:
+                        self.engine.send_command("stop")
+                        self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+                        self.engine.send_command("go infinite")
+                    self.selected_pos = None
+                else:
+                    self.selected_pos = None
+            elif self.chess_board.board[cx][cy]:
+                self.selected_pos = (cx, cy)
+                
+            self.redraw_board()
+            self.update_info_panel()
+
+    def update_engine_info(self):
+        """定时获取引擎输出更新"""
+        if self.engine.engine and self.analysis_mode:
+            updated = False
+            while not self.engine.queue.empty():
+                line = self.engine.queue.get()
+                parts = line.split()
                 try:
                     multipv_index = int(parts[parts.index('multipv') + 1]) - 1 if 'multipv' in parts else 0
-                    while len(analysis_lines) <= multipv_index: analysis_lines.append({})
-                    current_analysis = analysis_lines[multipv_index]
+                    while len(self.analysis_lines) <= multipv_index: self.analysis_lines.append({})
+                    
+                    current_analysis = self.analysis_lines[multipv_index]
                     if 'depth' in parts: current_analysis['depth'] = parts[parts.index('depth')+1]
                     if 'score' in parts: current_analysis['score'] = f"{parts[parts.index('score')+1]} {parts[parts.index('score')+2]}"
                     if 'pv' in parts:
                         pv_idx = parts.index('pv')
                         current_analysis['pv'] = ' '.join(parts[pv_idx+1:])
                         if parts[pv_idx+1:]: current_analysis['bestmove'] = parts[pv_idx+1]
+                    updated = True
                 except (ValueError, IndexError): pass
-        
-        screen.fill((255, 255, 255))
-        draw_board(screen, layout)
-
-        if pgn_creation_mode or pgn_view_mode:
-            # 步骤1. 绘制固定的、完整的面板背景
-            full_panel_rect = pygame.Rect(0, layout.menu_height, layout.pgn_panel_width, layout.height - layout.menu_height)
-            pygame.draw.rect(screen, COLORS['panel'], full_panel_rect)
             
-            # 步骤2. 调用已修复的函数，它现在会在透明画布上绘制文字，并“贴”到上面的背景上
-            pgn_content_height = draw_pgn_panel(screen, layout, pgn_handler, layout.fonts['pgn'], pgn_move_rects, pgn_scroll_y)
-            
-            # 步骤3. 在固定的背景上绘制UI元素（按钮等）
-            is_editable_mode = pgn_creation_mode or (pgn_view_mode and pgn_record_after_load)
-            if is_editable_mode:
-                if layout.export_pgn_button: pygame.draw.rect(screen, COLORS['button'], layout.export_pgn_button, border_radius=5)
-                ts = layout.fonts['menu'].render("导出棋谱", True, COLORS['text'])
-                if layout.export_pgn_button: screen.blit(ts, ts.get_rect(center=layout.export_pgn_button.center))
-                if layout.comment_box: pygame.draw.rect(screen, (240, 240, 240), layout.comment_box)
-                if layout.comment_box: pygame.draw.rect(screen, (0,0,0), layout.comment_box, 1)
-                comment_display_text = comment_text + ("|" if comment_input_active else "")
-                ts = layout.fonts['pgn'].render(comment_display_text, True, (0,0,0))
-                if layout.comment_box: screen.blit(ts, (layout.comment_box.x + 5, layout.comment_box.y + 5))
+            if updated:
+                self.redraw_board()
+                self.update_info_panel()
+                
+        # 每100ms重新检查一次队里
+        self.root.after(100, self.update_engine_info)
 
-        if show_move_markers and last_move:
-            from_pos, to_pos = last_move
-            marker_surf = pygame.Surface((layout.cell_size, layout.cell_size), pygame.SRCALPHA)
-            pygame.draw.rect(marker_surf, COLORS["last_move"], (0, 0, layout.cell_size, layout.cell_size))
-            fx, fy = (BOARD_COLS - 1 - from_pos[0], BOARD_ROWS - 1 - from_pos[1]) if board_flipped else from_pos
-            tx, ty = (BOARD_COLS - 1 - to_pos[0], BOARD_ROWS - 1 - to_pos[1]) if board_flipped else to_pos
-            screen.blit(marker_surf, (layout.board_x_start + fx * layout.cell_size, layout.menu_height + fy * layout.cell_size))
-            screen.blit(marker_surf, (layout.board_x_start + tx * layout.cell_size, layout.menu_height + ty * layout.cell_size))
+    def update_info_panel(self):
+        """刷新右侧的分析数据显示"""
+        self.info_text.config(state=tk.NORMAL)
+        self.info_text.delete("1.0", tk.END)
         
-        if selected_pos:
-            sx, sy = (BOARD_COLS - 1 - selected_pos[0], BOARD_ROWS - 1 - selected_pos[1]) if board_flipped else selected_pos
-            sel_rect_surf = pygame.Surface((layout.cell_size, layout.cell_size), pygame.SRCALPHA)
-            pygame.draw.rect(sel_rect_surf, COLORS["selection"], (0, 0, layout.cell_size, layout.cell_size), 4)
-            screen.blit(sel_rect_surf, (layout.board_x_start + sx * layout.cell_size, layout.menu_height + sy * layout.cell_size))
+        turn_str = '红方' if self.chess_board.turn == 'w' else '黑方'
+        self.info_text.insert(tk.END, f"轮到: {turn_str}\n\n")
         
-        for y_idx in range(BOARD_ROWS):
-            for x_idx in range(BOARD_COLS):
-                piece = chess_board.board[x_idx][y_idx]
-                if piece and piece in layout.scaled_pieces:
-                    draw_x, draw_y = (BOARD_COLS - 1 - x_idx, BOARD_ROWS - 1 - y_idx) if board_flipped else (x_idx, y_idx)
-                    screen.blit(layout.scaled_pieces[piece], (layout.board_x_start + draw_x * layout.cell_size, layout.menu_height + draw_y * layout.cell_size))
-        
-        if analysis_mode:
-            for i, analysis in enumerate(analysis_lines):
-                if analysis.get('bestmove'):
-                    match = re.match(r'^([a-g])([1-7])([a-g])([1-7])$', analysis['bestmove'])
-                    if match:
-                        fc, fr, tc, tr = match.groups()
-                        x1, y1 = ord(fc) - ord('a'), BOARD_ROWS - int(fr)
-                        x2, y2 = ord(tc) - ord('a'), BOARD_ROWS - int(tr)
-                        draw_arrow(screen, (x1, y1), (x2, y2), board_flipped, layout, color=COLORS["arrow"] if i == 0 else COLORS["arrow_blue"])
-        
-        if layout.info_width > 0:
-            pygame.draw.rect(screen, COLORS['panel'], (layout.info_x_start, 0, layout.info_width, layout.height))
-            if layout.analysis_button:
-                pygame.draw.rect(screen, COLORS['button'], layout.analysis_button, border_radius=5)
-                text = '分析 - FSF 14: ON' if analysis_mode else '分析 - FSF 14: OFF'
-                ts = layout.fonts['info'].render(text, True, COLORS['text'])
-                screen.blit(ts, ts.get_rect(center=layout.analysis_button.center))
-                y_pos = layout.analysis_button.bottom + 20
-            else: y_pos = layout.menu_height + 20
-            info_lines = [f"轮到: {'红方' if chess_board.turn == 'w' else '黑方'}"]
-            if analysis_mode:
-                max_chars = max(1, int(layout.info_width / (layout.fonts['info'].get_height() * 0.7)) if layout.fonts['info'].get_height() > 0 else 10)
-                for i, analysis in enumerate(analysis_lines):
-                    if not analysis: continue
-                    info_lines.append(f"--- 变化 {i+1} ---")
-                    info_lines.append(f"深度: {analysis.get('depth', '')}")
-                    info_lines.append(f"评分: {analysis.get('score', '')}")
-                    pv = analysis.get('pv', '')
-                    info_lines.extend([pv[j:j+max_chars] for j in range(0, len(pv), max_chars)])
-            for line in info_lines:
-                ts = layout.fonts['info'].render(line, True, (0,0,0))
-                if y_pos + ts.get_height() < layout.height - 20:
-                    screen.blit(ts, (layout.info_x_start + 20, y_pos)); y_pos += ts.get_height() + 5
-            if layout.scaled_donate_img:
-                img_rect = layout.scaled_donate_img.get_rect(right=layout.width - 15, bottom=layout.height - 15)
-                screen.blit(layout.scaled_donate_img, img_rect)
-        
-        pygame.draw.rect(screen, COLORS['menu_bg'], (0, 0, layout.width, layout.menu_height))
-        for name, rect in layout.menus.items():
-            display_name = f"{name}: {'ON' if multipv_mode else 'OFF'}" if name == '多变' else name
-            ts = layout.fonts['menu'].render(display_name, True, COLORS['menu_text'])
-            screen.blit(ts, ts.get_rect(center=rect.center))
-        
-        if active_menu and active_menu in dropdown_items:
-            dropdown_rects[active_menu] = {}
-            start_rect = layout.menus[active_menu]
-            item_h = int(layout.menu_height * 0.9); item_w = int(start_rect.width * 1.8)
-            for i, (item_text, _) in enumerate(dropdown_items[active_menu]):
-                item_rect = pygame.Rect(start_rect.left, start_rect.bottom + i * item_h, item_w, item_h)
-                display_text = item_text
-                is_recording_active = pgn_creation_mode or (pgn_view_mode and pgn_record_after_load)
-                if (item_text == '翻转棋盘' and board_flipped) or \
-                   (item_text == '显示走子' and show_move_markers) or \
-                   (item_text == '制谱' and is_recording_active):
-                    display_text += " √"
-                bg_color = COLORS['dropdown_hover'] if item_rect.collidepoint(mouse_pos) else COLORS['dropdown_bg']
-                pygame.draw.rect(screen, bg_color, item_rect)
-                ts = layout.fonts['menu'].render(display_text, True, COLORS['menu_text'])
-                screen.blit(ts, (item_rect.x + 10, item_rect.y + (item_h - ts.get_height()) / 2))
-                dropdown_rects[active_menu][item_text] = item_rect
-        
-        pygame.display.flip()
-        clock.tick(30)
-    
-    if engine: engine.stop()
-    pygame.quit()
+        if self.analysis_mode:
+            for i, analysis in enumerate(self.analysis_lines):
+                if not analysis: continue
+                self.info_text.insert(tk.END, f"--- 变化 {i+1} ---\n")
+                self.info_text.insert(tk.END, f"深度: {analysis.get('depth', '')}\n")
+                self.info_text.insert(tk.END, f"评分: {analysis.get('score', '')}\n")
+                pv = analysis.get('pv', '')
+                self.info_text.insert(tk.END, f"{pv}\n\n")
+                
+        self.info_text.config(state=tk.DISABLED)
+
+    # --- 按钮操作指令映射 ---
+    def new_game(self):
+        self.chess_board = ChessBoard(FEN_INITIAL)
+        self.history = [self.chess_board.get_fen()]
+        self.last_move = None
+        self.selected_pos = None
+        self.analysis_lines.clear()
+        if self.engine.engine and self.analysis_mode:
+            self.engine.send_command("stop")
+            self.engine.send_command("ucinewgame") 
+            self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+            self.engine.send_command("go infinite")
+        self.redraw_board()
+        self.update_info_panel()
+
+    def copy_fen(self):
+        pyperclip.copy(self.chess_board.get_fen())
+
+    def paste_fen(self):
+        fen = simpledialog.askstring("粘贴Fen", "请输入FEN字符串:", parent=self.root)
+        if fen:
+            try:
+                self.chess_board.parse_fen(fen)
+                self.history =[self.chess_board.get_fen()]
+                self.last_move = None
+                self.analysis_lines.clear()
+                if self.engine.engine and self.analysis_mode:
+                    self.engine.send_command("stop")
+                    self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+                    self.engine.send_command("go infinite")
+                self.redraw_board()
+                self.update_info_panel()
+            except Exception as e:
+                print(f"FEN解析错误: {e}")
+
+    def undo_move(self):
+        if len(self.history) > 1:
+            self.history.pop()
+            self.chess_board.parse_fen(self.history[-1])
+            self.analysis_lines.clear()
+            if self.engine.engine and self.analysis_mode:
+                self.engine.send_command("stop")
+                self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+                self.engine.send_command("go infinite")
+            self.selected_pos = None
+            self.last_move = None
+            self.redraw_board()
+            self.update_info_panel()
+
+    def toggle_flip(self):
+        self.board_flipped = self.flip_var.get()
+        self.redraw_board()
+
+    def toggle_markers(self):
+        self.show_move_markers = self.markers_var.get()
+        self.redraw_board()
+
+    def toggle_multipv(self):
+        self.multipv_mode = self.multipv_var.get()
+        if self.engine.engine:
+            self.engine.send_command(f"setoption name MultiPV value {2 if self.multipv_mode else 1}")
+            if self.analysis_mode:
+                self.analysis_lines.clear()
+                self.engine.send_command("stop")
+                self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+                self.engine.send_command("go infinite")
+        self.update_info_panel()
+
+    def toggle_analysis(self):
+        self.analysis_mode = not self.analysis_mode
+        self.analysis_btn.config(text=f"分析: {'ON' if self.analysis_mode else 'OFF'}")
+        if self.analysis_mode:
+            if self.engine.engine:
+                self.analysis_lines.clear()
+                self.engine.send_command(f"position fen {self.chess_board.get_fen()}")
+                self.engine.send_command("go infinite")
+        else:
+            if self.engine.engine: self.engine.send_command("stop")
+            self.analysis_lines.clear()
+        self.redraw_board()
+        self.update_info_panel()
+
+    def open_settings(self):
+        show_settings_window(self.engine, self.chess_board, self.analysis_mode, self.root)
+
+    def on_closing(self):
+        if self.engine:
+            self.engine.stop()
+        self.root.destroy()
+
+def main():
+    root = tk.Tk()
+    app = ChessApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
 
 if __name__ == "__main__":
     main()
