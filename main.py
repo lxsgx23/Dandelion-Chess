@@ -20,6 +20,35 @@ ROWS, COLS = 9, 7
 ANALYSIS_PANEL_RATIO = 0.3  # 分析面板宽度比例
 ANNOUNCE_RATIO = 0.2  # 公告栏宽度比例
 KATAGO_COMMAND = "./resource/engine/katago.exe gtp -config ./resource/engine/engine2024.cfg -model ./resource/engine/b10c384nbt.bin.gz -override-config drawJudgeRule=WEIGHT"
+NORMAL_MAX_VISITS = 1000000000
+HUMAN_AI_ANALYZE_COMMAND = GTP_COMMAND_ANALYZE
+HUMAN_AI_EVALUATION_VISITS = 500
+HUMAN_AI_DIFFICULTIES = [
+    ("新手", 50),
+    ("业余", 150),
+    ("爱好者", 500),
+    ("大师", 1500),
+    ("特级大师", 3000),
+]
+DRAW_MOVE_LIMIT = 300
+BLUE_DEN = (8, 3)  # D1
+RED_DEN = (0, 3)   # D9
+DENS = {'w': BLUE_DEN, 'b': RED_DEN}
+TRAPS = {
+    'w': {(8, 2), (7, 3), (8, 4)},  # C1, D2, E1
+    'b': {(0, 2), (1, 3), (0, 4)},  # C9, D8, E9
+}
+WATER = {
+    (3, 1), (3, 2), (4, 1), (4, 2), (5, 1), (5, 2),
+    (3, 4), (3, 5), (4, 4), (4, 5), (5, 4), (5, 5),
+}
+PIECE_RANKS = {
+    'r': 1, 'c': 2, 'd': 3, 'w': 4, 'j': 5, 't': 6, 'l': 7, 'e': 8,
+}
+PIECE_NAMES_CN = {
+    'r': '鼠', 'c': '猫', 'd': '狗', 'w': '狼',
+    'j': '豹', 't': '虎', 'l': '狮', 'e': '象',
+}
 
 ANALYSIS_COLOR = (255, 255, 0, 100)
 # GTP控制台常量
@@ -56,15 +85,7 @@ def movestr_to_pos(move):
     return col, row
 
 def draw_arrow(arrow_surface, start_pos, end_pos, line_width, arrow_size, color=(128, 128, 128, 128)):
-    """
-    在屏幕上绘制一个半透明的粗箭头
-    :param screen: Pygame 的 Surface 对象（屏幕）
-    :param start_pos: 箭头起点坐标 (x1, y1)
-    :param end_pos: 箭头终点坐标 (x2, y2)
-    :param color: 箭头颜色，RGBA 格式（默认是半透明灰色）
-    :param line_width: 箭头线的宽度（默认 10）
-    :param arrow_size: 箭头头部的大小（默认 20）
-    """
+
     # 计算箭头的方向
     dx, dy = end_pos[0] - start_pos[0], end_pos[1] - start_pos[1]
     if dx * dx < 5 and dy * dy < 5:
@@ -167,6 +188,371 @@ class Dandelion:
         self.show_error_dialog = True
         self.error_message = message
 
+    def player_name(self, player):
+        return "蓝方" if player == 'w' else "红方"
+
+    def gtp_color_for_player(self, player):
+        return 'B' if player == 'w' else 'W'
+
+    def is_piece_of_player(self, piece, player):
+        if piece == ' ':
+            return False
+        return (player == 'w' and piece.isupper()) or (player == 'b' and piece.islower())
+
+    def piece_owner(self, piece):
+        if piece == ' ':
+            return None
+        return 'w' if piece.isupper() else 'b'
+
+    def piece_rank(self, piece):
+        return PIECE_RANKS.get(piece.lower(), 0)
+
+    def result_text(self, result):
+        if not result:
+            return ""
+        if result.get('type') == 'draw':
+            return f"和棋：{result.get('reason', '')}"
+        return f"{self.player_name(result.get('winner'))}胜：{result.get('reason', '')}"
+
+    def can_lion_tiger_jump_over_own_rat(self):
+        return self.game_rule in [2, 3]
+
+    def can_water_land_rats_capture(self):
+        return self.game_rule in [1, 3]
+
+    def is_water(self, row, col):
+        return (row, col) in WATER
+
+    def is_own_den(self, player, row, col):
+        return DENS[player] == (row, col)
+
+    def can_capture_piece(self, piece, target_piece, from_pos, to_pos):
+        if target_piece == ' ':
+            return True
+
+        player = self.piece_owner(piece)
+        target_player = self.piece_owner(target_piece)
+        if player is None or target_player is None or player == target_player:
+            return False
+
+        # A piece in the defender's own trap can be captured by any defender.
+        if to_pos in TRAPS[player]:
+            return True
+
+        piece_type = piece.lower()
+        target_type = target_piece.lower()
+        from_water = from_pos in WATER
+        to_water = to_pos in WATER
+
+        if piece_type == 'r' and target_type == 'r':
+            if from_water != to_water and not self.can_water_land_rats_capture():
+                return False
+            return True
+
+        if piece_type == 'r' and target_type == 'e':
+            return not from_water
+        if piece_type == 'e' and target_type == 'r':
+            return False
+
+        mover_rank = self.piece_rank(piece)
+        target_rank = self.piece_rank(target_piece)
+        if from_pos in TRAPS[target_player]:
+            mover_rank = 0
+        return mover_rank >= target_rank
+
+    def legal_move_destination(self, row, col, drow, dcol):
+        piece = self.board[row][col]
+        player = self.piece_owner(piece)
+        if player is None:
+            return None
+
+        target_row = row + drow
+        target_col = col + dcol
+        if not (0 <= target_row < ROWS and 0 <= target_col < COLS):
+            return None
+
+        if piece.lower() in ('l', 't') and self.is_water(target_row, target_col):
+            jump_row, jump_col = target_row, target_col
+            while 0 <= jump_row < ROWS and 0 <= jump_col < COLS and self.is_water(jump_row, jump_col):
+                blocker = self.board[jump_row][jump_col]
+                if blocker.lower() == 'r':
+                    blocker_owner = self.piece_owner(blocker)
+                    if blocker_owner != player or not self.can_lion_tiger_jump_over_own_rat():
+                        return None
+                jump_row += drow
+                jump_col += dcol
+
+            if not (0 <= jump_row < ROWS and 0 <= jump_col < COLS):
+                return None
+            target_row, target_col = jump_row, jump_col
+
+        if self.is_own_den(player, target_row, target_col):
+            return None
+
+        target_piece = self.board[target_row][target_col]
+        if target_piece != ' ' and self.piece_owner(target_piece) == player:
+            return None
+
+        if self.is_water(target_row, target_col) and piece.lower() != 'r':
+            return None
+
+        if target_piece != ' ' and not self.can_capture_piece(piece, target_piece, (row, col), (target_row, target_col)):
+            return None
+
+        return target_row, target_col
+
+    def has_legal_move(self, player):
+        for row in range(ROWS):
+            for col in range(COLS):
+                piece = self.board[row][col]
+                if not self.is_piece_of_player(piece, player):
+                    continue
+                for drow, dcol in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    if self.legal_move_destination(row, col, drow, dcol) is not None:
+                        return True
+        return False
+
+    def calculate_game_result(self):
+        if self.board[RED_DEN[0]][RED_DEN[1]] != ' ' and self.piece_owner(self.board[RED_DEN[0]][RED_DEN[1]]) == 'w':
+            return {'type': 'win', 'winner': 'w', 'reason': '进入红色兽穴D9'}
+        if self.board[BLUE_DEN[0]][BLUE_DEN[1]] != ' ' and self.piece_owner(self.board[BLUE_DEN[0]][BLUE_DEN[1]]) == 'b':
+            return {'type': 'win', 'winner': 'b', 'reason': '进入蓝色兽穴D1'}
+        if self.current_movenum >= DRAW_MOVE_LIMIT:
+            return {'type': 'draw', 'winner': None, 'reason': '达到300步（150回合）'}
+        if not self.has_legal_move(self.current_player):
+            return {'type': 'win', 'winner': get_opp(self.current_player), 'reason': f"{self.player_name(self.current_player)}无子可动"}
+        return None
+
+    def update_game_result(self):
+        self.game_result = self.calculate_game_result()
+        if self.game_result and self.mode == "human_ai":
+            self.human_ai_game_over = True
+            self.human_ai_ai_thinking = False
+            self.human_ai_status = self.result_text(self.game_result)
+        return self.game_result
+
+    def copy_board(self, board=None):
+        source = self.board if board is None else board
+        return [row.copy() for row in source]
+
+    def board_to_fen(self, board, player=None):
+        fen_rows = []
+        for row in board:
+            fen_row = []
+            empty = 0
+            for cell in row:
+                if cell == ' ':
+                    empty += 1
+                else:
+                    if empty > 0:
+                        fen_row.append(str(empty))
+                        empty = 0
+                    fen_row.append(cell)
+            if empty > 0:
+                fen_row.append(str(empty))
+            fen_rows.append(''.join(fen_row))
+        fen = '/'.join(fen_rows)
+        if player is not None:
+            fen += f' {player}'
+        return fen
+
+    def coord_to_movestr(self, row, col):
+        return f"{chr(col + ord('A'))}{ROWS - row}"
+
+    def move_notation(self, move):
+        piece_name = PIECE_NAMES_CN.get(move.get('piece', ' ').lower(), '?')
+        sr, sc = move['start']
+        er, ec = move['end']
+        if er < sr:
+            direction = '上'
+        elif er > sr:
+            direction = '下'
+        elif ec < sc:
+            direction = '左'
+        elif ec > sc:
+            direction = '右'
+        else:
+            direction = '?'
+        return f"{piece_name}{direction}"
+
+    def reset_kifu_tree(self, board=None, player=None):
+        start_board = self.copy_board(board)
+        start_player = self.current_player if player is None else player
+        self.kifu_next_id = 1
+        self.kifu_nodes = {
+            0: {
+                'id': 0,
+                'parent': None,
+                'children': [],
+                'move': None,
+                'board': start_board,
+                'player': start_player,
+                'move_num': 0,
+                'last_move': None,
+            }
+        }
+        self.current_node_id = 0
+        self.view_node_id = 0
+        self.kifu_line_leaf_id = 0
+        self.move_history = []
+
+    def get_node_path_ids(self, node_id):
+        if node_id not in self.kifu_nodes:
+            return [0]
+        path = []
+        while node_id is not None and node_id in self.kifu_nodes:
+            path.append(node_id)
+            node_id = self.kifu_nodes[node_id]['parent']
+        return list(reversed(path))
+
+    def get_move_path(self, node_id):
+        moves = []
+        for path_id in self.get_node_path_ids(node_id)[1:]:
+            moves.append(self.kifu_nodes[path_id]['move'])
+        return moves
+
+    def is_node_on_line(self, node_id, line_ids):
+        return node_id in line_ids
+
+    def descend_first_child(self, node_id):
+        while node_id in self.kifu_nodes and self.kifu_nodes[node_id]['children']:
+            node_id = self.kifu_nodes[node_id]['children'][0]
+        return node_id
+
+    def displayed_line_ids(self):
+        leaf = self.kifu_line_leaf_id
+        if leaf not in self.kifu_nodes:
+            leaf = self.current_node_id if self.current_node_id in self.kifu_nodes else 0
+            self.kifu_line_leaf_id = leaf
+        line_ids = self.get_node_path_ids(leaf)
+        if self.view_node_id not in line_ids:
+            line_ids = self.get_node_path_ids(self.view_node_id)
+        return line_ids
+
+    def set_view_node(self, node_id, update_line=False):
+        if node_id not in self.kifu_nodes:
+            return
+        if self.selected_piece is not None:
+            self.unselect()
+            self.selected_piece = None
+        self.view_node_id = node_id
+        if update_line:
+            self.kifu_line_leaf_id = self.descend_first_child(node_id)
+
+    def kifu_nav_start(self):
+        self.set_view_node(0)
+
+    def kifu_nav_prev(self):
+        node = self.kifu_nodes.get(self.view_node_id)
+        if node and node['parent'] is not None:
+            self.set_view_node(node['parent'])
+
+    def kifu_nav_next(self):
+        line_ids = self.displayed_line_ids()
+        if self.view_node_id in line_ids:
+            index = line_ids.index(self.view_node_id)
+            if index + 1 < len(line_ids):
+                self.set_view_node(line_ids[index + 1])
+                return
+        node = self.kifu_nodes.get(self.view_node_id)
+        if node and node['children']:
+            self.set_view_node(node['children'][0], update_line=True)
+
+    def kifu_nav_latest(self):
+        self.set_view_node(self.current_node_id, update_line=True)
+        self.kifu_line_leaf_id = self.current_node_id
+
+    def get_display_node(self):
+        return self.kifu_nodes.get(self.view_node_id, self.kifu_nodes[0])
+
+    def is_viewing_current_node(self):
+        return self.view_node_id == self.current_node_id
+
+    def apply_node_to_live_state(self, node_id):
+        node = self.kifu_nodes.get(node_id)
+        if not node:
+            return
+        self.board = self.copy_board(node['board'])
+        self.current_player = node['player']
+        self.current_movenum = node['move_num']
+        self.last_move = node['last_move']
+        self.selected_piece = None
+        self.move_evaluation = None
+        self.move_history = self.get_move_path(node_id)
+        self.current_node_id = node_id
+        self.view_node_id = node_id
+        self.game_result = self.calculate_game_result()
+
+    def sync_engine_to_node(self, node_id, restart_analysis=True):
+        if node_id not in self.kifu_nodes:
+            return
+        root = self.kifu_nodes[0]
+        self.try_send_command("stop")
+        self.try_send_command("setfen " + self.board_to_fen(root['board'], root['player']))
+        for move in self.get_move_path(node_id):
+            color = self.gtp_color_for_player(move['player'])
+            sr, sc = move['start']
+            er, ec = move['end']
+            self.try_send_command(f"play {color} {self.coord_to_movestr(sr, sc)}")
+            self.try_send_command(f"play {color} {self.coord_to_movestr(er, ec)}")
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+        result = self.update_game_result()
+        if result:
+            self.try_send_command("stop")
+        elif restart_analysis and self.analyzing:
+            self.try_send_command(GTP_COMMAND_ANALYZE)
+
+    def activate_view_node_for_branch(self, restart_analysis=True):
+        if self.is_viewing_current_node():
+            return
+        self.apply_node_to_live_state(self.view_node_id)
+        self.kifu_line_leaf_id = self.view_node_id
+        self.sync_engine_to_node(self.view_node_id, restart_analysis=restart_analysis)
+        self.ui_status = "已从历史局面创建新分支起点"
+
+    def same_tree_move(self, a, b):
+        return (
+            a.get('player') == b.get('player') and
+            a.get('start') == b.get('start') and
+            a.get('end') == b.get('end')
+        )
+
+    def record_move_in_kifu(self, move):
+        parent_id = self.current_node_id if self.current_node_id in self.kifu_nodes else 0
+        move = move.copy()
+        move['notation'] = self.move_notation(move)
+        existing_id = None
+        for child_id in self.kifu_nodes[parent_id]['children']:
+            if self.same_tree_move(self.kifu_nodes[child_id]['move'], move):
+                existing_id = child_id
+                break
+
+        if existing_id is None:
+            node_id = self.kifu_next_id
+            self.kifu_next_id += 1
+            self.kifu_nodes[parent_id]['children'].append(node_id)
+            self.kifu_nodes[node_id] = {
+                'id': node_id,
+                'parent': parent_id,
+                'children': [],
+                'move': move,
+                'board': self.copy_board(),
+                'player': self.current_player,
+                'move_num': self.current_movenum,
+                'last_move': self.last_move,
+            }
+        else:
+            node_id = existing_id
+
+        self.current_node_id = node_id
+        self.view_node_id = node_id
+        self.kifu_line_leaf_id = node_id
+        self.move_history = self.get_move_path(node_id)
+
     def prompt_for_fen(self):
         """弹出对话框让用户输入FEN字符串"""
         try:
@@ -229,12 +615,16 @@ class Dandelion:
                 self.selected_piece = None
                 self.last_move = None
                 self.current_movenum = 0
-                self.move_history = []  # 重置历史记录
+                self.game_result = None
+                self.reset_kifu_tree(self.board, self.current_player)
 
             # 同步到KataGo
             self.sync_board_assume_locked()
             self.try_send_command(f"setfen {self.get_fen()}", enable_lock=False)
-            if self.analyzing:
+            result = self.update_game_result()
+            if result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
         except Exception as e:
@@ -288,6 +678,7 @@ class Dandelion:
         # 分析系统
         self.analyzing = True
         self.analysis_results = []
+        self.analysis_root_visits = 0
         self.analysis_lock = threading.Lock()
         self.gtp_log = []  # GTP日志存储
         self.scroll_offset = 0  # 滚动条位置
@@ -298,6 +689,21 @@ class Dandelion:
         self.movenum_limit = 300  # 步数限制(mm)
         self.simple_mode = False  # 精简模式标志
         self.move_evaluation = None # To store the evaluation of the last move
+        self.game_result = None
+        self.human_ai_phase = "setup"
+        self.human_ai_player = 'w'
+        self.human_ai_difficulty_index = 2
+        self.human_ai_ai_thinking = False
+        self.human_ai_ai_target_visits = HUMAN_AI_DIFFICULTIES[self.human_ai_difficulty_index][1]
+        self.human_ai_root_visits = 0
+        self.human_ai_display_visits = 0
+        self.human_ai_status = "请选择执棋方、难度和开局方式"
+        self.human_ai_buttons = {}
+        self.human_ai_game_over = False
+        self.main_buttons = {}
+        self.kifu_buttons = {}
+        self.ui_status = ""
+        self.reset_kifu_tree(self.board, self.current_player)
 
         # kata-set-rule scoring 0   狮虎不能跳过己方老鼠，河里和陆上的老鼠不能互吃
         # kata-set-rule scoring 1   狮虎不能跳过己方老鼠，河里和陆上的老鼠能互吃
@@ -434,13 +840,14 @@ class Dandelion:
         self.last_move = None
         self.analysis_results = []
         self.current_movenum = 0
-        self.move_history = []
         self.move_evaluation = None # 重置走法评估
+        self.game_result = None
+        self.reset_kifu_tree(self.board, self.current_player)
         self.try_send_command("clear_board")
         self.set_movelimit(300)
 
     def sync_board_assume_locked(self, undo_once=False):
-        self.current_movenum = 0
+        move_num_before_sync = self.current_movenum
         next_player_should_be = self.current_player
         if undo_once:
             next_player_should_be = self.current_player if self.selected_piece is not None else get_opp(
@@ -448,6 +855,7 @@ class Dandelion:
         self.analysis_results.clear()
         self.selected_piece = None
         self.current_player = next_player_should_be
+        self.current_movenum = move_num_before_sync
 
         fen = self.get_fen(has_pla=False)
         fen = f"{fen} {next_player_should_be}"
@@ -458,7 +866,10 @@ class Dandelion:
             self.current_player = get_opp(self.current_player)
             self.sync_board_assume_locked()
             self.move_evaluation = None # 重置走法评估
-            if self.analyzing:
+            result = self.update_game_result()
+            if result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
     def set_aggressive_mode(self, ag_mode):
@@ -473,7 +884,9 @@ class Dandelion:
             elif self.aggressive_mode == -1:
                 self.try_send_command("komi -9.0", enable_lock=False)
                 self.try_send_command("kata-set-param playoutDoublingAdvantage 1.5", enable_lock=False)
-            if self.analyzing:
+            if self.game_result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
     def set_movelimit(self, movelimit):
@@ -487,7 +900,10 @@ class Dandelion:
             self.movenum_limit = movelimit
             self.try_send_command(f"mm {movelimit}", enable_lock=False)
             self.try_send_command("mc 0", enable_lock=False)
-            if self.analyzing:
+            result = self.update_game_result()
+            if result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
     def set_game_rule(self, rule):
@@ -495,7 +911,10 @@ class Dandelion:
             self.sync_board_assume_locked()
             self.game_rule = rule
             self.try_send_command(f"kata-set-rule scoring {rule}", enable_lock=False)
-            if self.analyzing:
+            result = self.update_game_result()
+            if result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
     def set_game_drawrule(self, rule):
@@ -503,7 +922,10 @@ class Dandelion:
             self.sync_board_assume_locked()
             self.game_drawrule = rule
             self.try_send_command(f"kata-set-rule drawjudge {rule}", enable_lock=False)
-            if self.analyzing:
+            result = self.update_game_result()
+            if result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
     def set_game_looprule(self, rule):
@@ -511,7 +933,10 @@ class Dandelion:
             self.sync_board_assume_locked()
             self.game_looprule = rule
             self.try_send_command(f"kata-set-rule looprule {rule}", enable_lock=False)
-            if self.analyzing:
+            result = self.update_game_result()
+            if result:
+                self.try_send_command("stop", enable_lock=False)
+            elif self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
     def read_stderr(self):
@@ -534,7 +959,10 @@ class Dandelion:
                     if "illegal" in line:
                         print("Detect illegal move, sync with the engine")
                         self.sync_board_assume_locked(undo_once=True)
-                        if self.analyzing:
+                        result = self.update_game_result()
+                        if result:
+                            self.try_send_command("stop", enable_lock=False)
+                        elif self.analyzing:
                             self.try_send_command(GTP_COMMAND_ANALYZE, enable_lock=False)
 
                     self.gtp_log.append(('recv', line))
@@ -542,6 +970,14 @@ class Dandelion:
                         self.gtp_log.pop(0)
 
     def handle_analysis_line(self, line):
+        if "rootInfo" in line:
+            root_match = re.search(r'rootInfo.*?\bvisits\s+(\d+)', line)
+            if root_match:
+                with self.analysis_lock:
+                    self.analysis_root_visits = int(root_match.group(1))
+                    if self.mode == "human_ai" and self.human_ai_ai_thinking:
+                        self.human_ai_root_visits = self.analysis_root_visits
+
         if "info" in line and "visits" in line and "winrate" in line:
             pattern = re.compile(
                 r'info move (\w+)'
@@ -550,7 +986,7 @@ class Dandelion:
                 r'.*?scoreMean ([-\d.]+(?:[eE][-+]?\d+)?)'
                 r'.*?lcb ([-\d.]+(?:[eE][-+]?\d+)?)'
                 r'.*?order (\d+)'
-                r'.*?pv ([\w\s]+?)(?=\s*info|$)',
+                r'.*?pv ([\w\s]+?)(?=\s*(?:info|rootInfo|ownership|ownershipStdev|$))',
                 re.DOTALL
             )
             with self.analysis_lock:
@@ -599,10 +1035,10 @@ class Dandelion:
 
                 self.analysis_results.sort(key=lambda x: (-x['visits'], -x['winrate']))
 
-    def evaluate_move(self, analysis_data, user_move_coords):
+    def evaluate_move(self, analysis_data, user_move_coords, force=False):
         """根据用户走法评估并设置 self.move_evaluation"""
         self.move_evaluation = None
-        if not self.analyzing or not analysis_data:
+        if not (self.analyzing or force) or not analysis_data:
             return
 
         best_move = analysis_data[0]
@@ -637,6 +1073,78 @@ class Dandelion:
         elif win_rate_drop >= 20:
             self.move_evaluation = {'image_key': 'blunder', 'text': "恶手。"}
 
+    def get_best_analysis_pv(self, analysis_data):
+        if not analysis_data:
+            return None
+
+        best_move = next((r for r in analysis_data if r.get('order') == 0), None)
+        if not best_move:
+            best_move = sorted(
+                analysis_data,
+                key=lambda x: (-x.get('visits', 0), -x.get('winrate', 0))
+            )[0]
+
+        pv_moves = best_move.get('pv', '').split()
+        if len(pv_moves) < 2:
+            return None
+        return pv_moves[0], pv_moves[1]
+
+    def play_move_strings(self, start_move_str, end_move_str, source="quick"):
+        sc, sr = movestr_to_pos(start_move_str)
+        ec, er = movestr_to_pos(end_move_str)
+
+        if sr is None or er is None:
+            return False
+        if not (0 <= sr < ROWS and 0 <= sc < COLS and 0 <= er < ROWS and 0 <= ec < COLS):
+            return False
+
+        piece = self.board[sr][sc]
+        if not self.is_piece_of_player(piece, self.current_player):
+            print(f"Engine suggested an invalid move for player {self.current_player}: moving piece '{piece}' at {start_move_str}")
+            return False
+
+        captured_piece = self.board[er][ec] if self.board[er][ec] != ' ' else None
+        self.board[er][ec] = self.board[sr][sc]
+        self.board[sr][sc] = ' '
+
+        self.last_move = ((sr, sc), (er, ec))
+        self.current_movenum += 1
+        player_before_move = self.current_player
+        move_record = {
+            'start': (sr, sc), 'end': (er, ec),
+            'piece': self.board[er][ec], 'captured': captured_piece,
+            'player': player_before_move, 'source': source
+        }
+
+        self.current_player = get_opp(self.current_player)
+        self.record_move_in_kifu(move_record)
+        self.selected_piece = None
+        if not (self.mode == "human_ai" and source == "ai"):
+            self.move_evaluation = None
+
+        color = self.gtp_color_for_player(player_before_move)
+        self.try_send_command(f"play {color} {start_move_str}")
+        self.try_send_command(f"play {color} {end_move_str}")
+
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+
+        result = self.update_game_result()
+        if result:
+            self.try_send_command("stop")
+        elif self.analyzing:
+            self.try_send_command(GTP_COMMAND_ANALYZE)
+        return True
+
+    def play_best_analysis_move(self, analysis_data, source="quick"):
+        pv = self.get_best_analysis_pv(analysis_data)
+        if not pv:
+            return False
+        return self.play_move_strings(pv[0], pv[1], source=source)
+
     def flip_coord(self, row, col):
         """翻转棋盘坐标（用于翻转棋盘功能）"""
         if self.flip_board:
@@ -645,14 +1153,19 @@ class Dandelion:
 
     def draw_main_board(self):
         """主程序分析面板的棋盘绘制"""
+        display_node = self.get_display_node()
+        display_board = display_node['board']
+        display_last_move = display_node['last_move']
+        viewing_current = self.is_viewing_current_node()
+
         # 绘制公告栏区域背景
         pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, self.announce_width, self.screen_height))
         # 绘制棋盘
         self.screen.blit(self.board_img, (self.announce_width, 0))
         
         # 绘制最后一步移动指示
-        if self.last_move:
-            start, end = self.last_move
+        if display_last_move:
+            start, end = display_last_move
             s_row, s_col = start
             e_row, e_col = end
             
@@ -667,7 +1180,7 @@ class Dandelion:
                             self.tile_size, self.tile_size), 3)
 
         # 绘制选中棋子指示（红色）
-        if self.selected_piece:
+        if viewing_current and self.selected_piece:
             row, col = self.selected_piece
             row, col = self.flip_coord(row, col)
             pygame.draw.rect(self.screen, (255, 0, 0),
@@ -677,7 +1190,7 @@ class Dandelion:
         # 绘制棋子
         for row in range(ROWS):
             for col in range(COLS):
-                piece = self.board[row][col]
+                piece = display_board[row][col]
                 if piece != ' ':
                     flip_row, flip_col = self.flip_coord(row, col)
                     img = self.piece_images[piece]
@@ -687,148 +1200,231 @@ class Dandelion:
                     ))
                     self.screen.blit(img, rect)
 
-        with self.analysis_lock:
+        if viewing_current:
+            with self.analysis_lock:
             # 精简模式只绘制最佳走法的箭头
-            if self.simple_mode:
-                if self.analysis_results is not None and len(self.analysis_results) >= 1:
-                    best_move = None
-                    for result in self.analysis_results:
-                        if result['order'] == 0:
-                            best_move = result
-                            break
-                    if best_move is None:
-                        best_move = self.analysis_results[0]
+                if self.simple_mode:
+                    if self.analysis_results is not None and len(self.analysis_results) >= 1:
+                        best_move = None
+                        for result in self.analysis_results:
+                            if result['order'] == 0:
+                                best_move = result
+                                break
+                        if best_move is None:
+                            best_move = self.analysis_results[0]
 
-                    col1, row1, col2, row2 = None, None, None, None
-                    if self.selected_piece is None:
-                        col1, row1 = best_move['col'], best_move['row']
-                        pvs = best_move['pv'].split()
-                        if len(pvs) > 1:
-                            col2, row2 = movestr_to_pos(pvs[1])
-                    else:
-                        row1, col1 = self.selected_piece
-                        col2, row2 = best_move['col'], best_move['row']
-                    if col1 is not None and col2 is not None:
-                        flip_row1, flip_col1 = self.flip_coord(row1, col1)
-                        flip_row2, flip_col2 = self.flip_coord(row2, col2)
-                        
-                        x1 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2
-                        x2 = self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
-                        y1 = flip_row1 * self.tile_size + self.tile_size // 2
-                        y2 = flip_row2 * self.tile_size + self.tile_size // 2
-                        dx, dy = x2 - x1, y2 - y1
-                        dis = (dx * dx + dy * dy) ** 0.5
-                        if dis > self.tile_size // 2:
-                            x1 += 0.5 * self.tile_size * dx / dis
-                            y1 += 0.5 * self.tile_size * dy / dis
-                            draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.25, 
-                                       self.tile_size * 0.05, self.tile_size * 0.4, 
-                                       color=(255, 0, 0, 200), color_out=(0, 0, 0, 200))
-            else:
-                if self.analysis_results is not None and len(self.analysis_results) >= 1:
-                    maxVisit = float(max([x['visits'] for x in self.analysis_results]))
-                    assert (maxVisit >= 1)
-                    for result in self.analysis_results:
-                        row, col = result['row'], result['col']
-                        flip_row, flip_col = self.flip_coord(row, col)
-                        v, is_best_move = result['visits'], result['order'] == 0
-                        assert (0 <= flip_row < ROWS and 0 <= flip_col < COLS)
-                        alpha_surface = pygame.Surface((self.tile_size, self.tile_size), pygame.SRCALPHA)
-                        c = float(v) / maxVisit
-                        spot_alpha = 255 if is_best_move else 255 * (0.4 * c + 0.3)
-                        spot_color = (255 * (1 - c), 255 * (0.5 + 0.5 * c), 255 * c, spot_alpha)
-                        text_bg_color = (spot_color[0], spot_color[1], spot_color[2], 100)
-                        text_color = (0, 0, 0, 255)
-
-                        if is_best_move:
-                            pygame.draw.circle(alpha_surface, (255, 0, 0, 255), (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.5)
-                            pygame.draw.circle(alpha_surface, spot_color, (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.45)
+                        col1, row1, col2, row2 = None, None, None, None
+                        if self.selected_piece is None:
+                            col1, row1 = best_move['col'], best_move['row']
+                            pvs = best_move['pv'].split()
+                            if len(pvs) > 1:
+                                col2, row2 = movestr_to_pos(pvs[1])
                         else:
-                            pygame.draw.circle(alpha_surface, spot_color, (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.5)
-                        pygame.draw.circle(alpha_surface, (0, 0, 0, 0), (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.4)
-                        self.screen.blit(alpha_surface, (self.announce_width + flip_col * self.tile_size, flip_row * self.tile_size))
+                            row1, col1 = self.selected_piece
+                            col2, row2 = best_move['col'], best_move['row']
+                        if col1 is not None and col2 is not None:
+                            flip_row1, flip_col1 = self.flip_coord(row1, col1)
+                            flip_row2, flip_col2 = self.flip_coord(row2, col2)
 
-                        self.draw_text(f"{result['winrate']:.1f}%", (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.31), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.35 * self.tile_size, bold=True)
-                        vstr = f"{v // 1000000}M" if v >= 10000000 else (f"{v // 1000}K" if v >= 10000 else f"{v}")
-                        self.draw_text(vstr, (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.6), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.25 * self.tile_size, bold=True)
-                        self.draw_text(f"{result['drawrate']:.1f}%", (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.8), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.25 * self.tile_size, bold=True)
+                            x1 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2
+                            x2 = self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
+                            y1 = flip_row1 * self.tile_size + self.tile_size // 2
+                            y2 = flip_row2 * self.tile_size + self.tile_size // 2
+                            dx, dy = x2 - x1, y2 - y1
+                            dis = (dx * dx + dy * dy) ** 0.5
+                            if dis > self.tile_size // 2:
+                                x1 += 0.5 * self.tile_size * dx / dis
+                                y1 += 0.5 * self.tile_size * dy / dis
+                                draw_arrow2(self.screen, (x1, y1), (x2, y2),
+                                            self.tile_size * 0.15,
+                                            self.tile_size * 0.03,
+                                            self.tile_size * 0.3)
+                else:
+                    if self.analysis_results is not None and len(self.analysis_results) >= 1:
+                        maxVisit = float(max([x['visits'] for x in self.analysis_results]))
+                        assert (maxVisit >= 1)
+                        for result in self.analysis_results:
+                            row, col = result['row'], result['col']
+                            flip_row, flip_col = self.flip_coord(row, col)
+                            v, is_best_move = result['visits'], result['order'] == 0
+                            assert (0 <= flip_row < ROWS and 0 <= flip_col < COLS)
+                            alpha_surface = pygame.Surface((self.tile_size, self.tile_size), pygame.SRCALPHA)
+                            c = float(v) / maxVisit
+                            spot_alpha = 255 if is_best_move else 255 * (0.4 * c + 0.3)
+                            spot_color = (255 * (1 - c), 255 * (0.5 + 0.5 * c), 255 * c, spot_alpha)
+                            text_bg_color = (spot_color[0], spot_color[1], spot_color[2], 100)
+                            text_color = (0, 0, 0, 255)
 
-                        if is_best_move:
-                            col1, row1, col2, row2 = None, None, None, None
-                            if self.selected_piece is None:
-                                col1, row1 = col, row
-                                pvs = result['pv'].split()
-                                if len(pvs) > 1:
-                                    col2, row2 = movestr_to_pos(pvs[1])
+                            if is_best_move:
+                                pygame.draw.circle(alpha_surface, (255, 0, 0, 255), (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.5)
+                                pygame.draw.circle(alpha_surface, spot_color, (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.45)
                             else:
-                                row1, col1 = self.selected_piece
-                                col2, row2 = col, row
-                            if col1 is not None and col2 is not None:
-                                flip_row1, flip_col1 = self.flip_coord(row1, col1)
-                                flip_row2, flip_col2 = self.flip_coord(row2, col2)
-                                x1, x2 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2, self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
-                                y1, y2 = flip_row1 * self.tile_size + self.tile_size // 2, flip_row2 * self.tile_size + self.tile_size // 2
-                                dx, dy = x2 - x1, y2 - y1
-                                dis = (dx * dx + dy * dy) ** 0.5
-                                if dis > self.tile_size // 2:
-                                    x1 += 0.5 * self.tile_size * dx / dis
-                                    y1 += 0.5 * self.tile_size * dy / dis
-                                    draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.15, self.tile_size * 0.03, self.tile_size * 0.3)
+                                pygame.draw.circle(alpha_surface, spot_color, (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.5)
+                            pygame.draw.circle(alpha_surface, (0, 0, 0, 0), (self.tile_size // 2, self.tile_size // 2), self.tile_size * 0.4)
+                            self.screen.blit(alpha_surface, (self.announce_width + flip_col * self.tile_size, flip_row * self.tile_size))
+
+                            self.draw_text(f"{result['winrate']:.1f}%", (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.31), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.35 * self.tile_size, bold=True)
+                            vstr = f"{v // 1000000}M" if v >= 10000000 else (f"{v // 1000}K" if v >= 10000 else f"{v}")
+                            self.draw_text(vstr, (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.6), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.25 * self.tile_size, bold=True)
+                            self.draw_text(f"{result['drawrate']:.1f}%", (self.announce_width + flip_col * self.tile_size + self.tile_size * 0.5, flip_row * self.tile_size + self.tile_size * 0.8), anchor='center', color=text_color, bg_color=text_bg_color, font_size=0.25 * self.tile_size, bold=True)
+
+                            if is_best_move:
+                                col1, row1, col2, row2 = None, None, None, None
+                                if self.selected_piece is None:
+                                    col1, row1 = col, row
+                                    pvs = result['pv'].split()
+                                    if len(pvs) > 1:
+                                        col2, row2 = movestr_to_pos(pvs[1])
+                                else:
+                                    row1, col1 = self.selected_piece
+                                    col2, row2 = col, row
+                                if col1 is not None and col2 is not None:
+                                    flip_row1, flip_col1 = self.flip_coord(row1, col1)
+                                    flip_row2, flip_col2 = self.flip_coord(row2, col2)
+                                    x1, x2 = self.announce_width + flip_col1 * self.tile_size + self.tile_size // 2, self.announce_width + flip_col2 * self.tile_size + self.tile_size // 2
+                                    y1, y2 = flip_row1 * self.tile_size + self.tile_size // 2, flip_row2 * self.tile_size + self.tile_size // 2
+                                    dx, dy = x2 - x1, y2 - y1
+                                    dis = (dx * dx + dy * dy) ** 0.5
+                                    if dis > self.tile_size // 2:
+                                        x1 += 0.5 * self.tile_size * dx / dis
+                                        y1 += 0.5 * self.tile_size * dy / dis
+                                        draw_arrow2(self.screen, (x1, y1), (x2, y2), self.tile_size * 0.15, self.tile_size * 0.03, self.tile_size * 0.3)
 
         self.draw_analysis_panel()
         self.draw_gtp_console()
-        self.draw_information_panel()
         self.draw_main_announcement()
 
         if self.show_error_dialog:
             self.draw_error_dialog()
 
-    def draw_main_announcement(self):
-        """主程序公告栏区域"""
-        self.draw_text("分析面板", (10, 10), font_size=24)
-        self.draw_text("操作说明：", (10, 50), font_size=20)
-        self.draw_text("棋子等素材可自由替换", (10, 80))
-        self.draw_text("I键: 通用和棋规则", (10, 110))
-        self.draw_text("O键: 子数和棋规则", (10, 130))
-        self.draw_text("P键: 子力和棋规则", (10, 150))
-        self.draw_text("7键: 悔棋", (10, 170))
-        self.draw_text("8键: 翻转棋盘视角", (10, 190))
-        self.draw_text("9键: 输入自定义局面FEN", (10, 210))
-        self.draw_text("W键: 快速出招", (10, 230))
-        self.draw_text("A键: 切换精简模式", (10, 250))
-        self.draw_text("GHJKL键: 切换和规", (10, 270))
-
-        button_rect = pygame.Rect(10, 310, 180, 40)
-        pygame.draw.rect(self.screen, (200, 200, 200), button_rect)
-        pygame.draw.rect(self.screen, (0, 0, 0), button_rect, 2)
-        self.draw_text("棋盘编辑器", (button_rect.centerx, button_rect.centery), anchor='center', color=(0, 0, 0))
-
-        self.draw_text("赞赏作者Laoxu：", (10, 370), font_size=20)
-        if self.donate_img:
-            self.screen.blit(self.donate_img, (10, 400))
+    def draw_panel_button(self, registry, key, text, rect, selected=False, disabled=False, font_size=16):
+        registry[key] = {'rect': rect, 'disabled': disabled}
+        if disabled:
+            fill = (176, 176, 176)
+            border = (120, 120, 120)
+            text_color = (90, 90, 90)
+        elif selected:
+            fill = (120, 180, 240)
+            border = (20, 80, 150)
+            text_color = (0, 0, 0)
         else:
-            pygame.draw.rect(self.screen, (200, 200, 200), (10, 400, 180, 180))
-            self.draw_text("捐赠图片位置", (100, 490), anchor='center', color=(100, 100, 100))
-        
-        self.draw_move_evaluation()
+            fill = (226, 226, 226)
+            border = (70, 70, 70)
+            text_color = (0, 0, 0)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=4)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=4)
+        self.draw_text(text, (rect.centerx, rect.centery), anchor='center', color=text_color, font_size=font_size)
 
-        link_y = 780  # 链接起始Y坐标
-        
-        self.draw_text("【Dandelion Chess】发布页", (10, link_y), color=(0, 0, 255), font_size=25)
-        self.link1_rect = pygame.Rect(10, link_y, 250, 25)
-        self.draw_text("【KataGo修改版】发布页", (10, link_y + 30), color=(0, 0, 255), font_size=25)
-        self.link2_rect = pygame.Rect(10, link_y + 30, 250, 25)
+    def draw_main_announcement(self):
+        """主程序左侧操作区"""
+        self.main_buttons = {}
+        x = 10
+        panel_w = self.announce_width - 20
+        gap = 6
+        col_w = max(82, (panel_w - gap) // 2)
+        btn_h = 28
+        y = 10
+
+        def section(title):
+            nonlocal y
+            self.draw_text(title, (x, y), font_size=18, bold=True)
+            y += 26
+
+        def button(key, text, col=0, span=1, selected=False, disabled=False):
+            nonlocal y
+            bw = panel_w if span == 2 else col_w
+            bx = x if col == 0 else x + col_w + gap
+            rect = pygame.Rect(bx, y, bw, btn_h)
+            self.draw_panel_button(self.main_buttons, key, text, rect, selected=selected, disabled=disabled, font_size=14)
+
+        section("分析")
+        button("toggle_analysis", "暂停分析" if self.analyzing else "继续分析", span=1, selected=self.analyzing)
+        button("quick_move", "快速出招", col=1, disabled=(not self.analyzing or self.selected_piece is not None))
+        y += btn_h + gap
+        button("restart", "重新开始")
+        button("swap_side", "切换方", col=1)
+        y += btn_h + 12
+
+        section("显示与棋局")
+        button("simple_mode", "精简" if self.simple_mode else "专业", selected=self.simple_mode)
+        button("flip", "翻转棋盘", col=1, selected=self.flip_board)
+        y += btn_h + gap
+        button("undo", "悔棋")
+        button("fen", "输入FEN", col=1)
+        y += btn_h + gap
+        button("move_limit_down", "步数-8")
+        button("move_limit_up", "步数+8", col=1)
+        y += btn_h + 12
+
+        section("策略")
+        button("aggr_balance", "平衡", selected=self.aggressive_mode == 0)
+        button("aggr_blue", "蓝激进", col=1, selected=self.aggressive_mode == 1)
+        y += btn_h + gap
+        button("aggr_red", "红激进", selected=self.aggressive_mode == -1)
+        button("human_ai", "人机对弈", col=1)
+        y += btn_h + 12
+
+        section("规则")
+        lion_text = "狮虎越鼠:开" if self.game_rule in [2, 3] else "狮虎越鼠:关"
+        rat_text = "鼠互吃:开" if self.game_rule in [1, 3] else "鼠互吃:关"
+        button("toggle_lion_rat", lion_text, selected=self.game_rule in [2, 3])
+        button("toggle_rat_capture", rat_text, col=1, selected=self.game_rule in [1, 3])
+        y += btn_h + gap
+        button("draw_draw", "通用和棋", selected=getattr(self, 'game_drawrule', '') == "DRAW")
+        button("draw_count", "子数和棋", col=1, selected=getattr(self, 'game_drawrule', '') == "COUNT")
+        y += btn_h + gap
+        button("draw_weight", "子力和棋", selected=getattr(self, 'game_drawrule', '') == "WEIGHT")
+        button("editor", "棋盘编辑器", col=1)
+        y += btn_h + gap
+        loop_buttons = [
+            ("loop_seventhree", "长打7-3", "seventhree"),
+            ("loop_fivetwo", "长打5-2", "fivetwo"),
+            ("loop_twoone", "长打2-1", "twoone"),
+            ("loop_repeatend", "重复终局", "repeatend"),
+            ("loop_none", "无循环规", "none"),
+        ]
+        for index, (key, text, value) in enumerate(loop_buttons):
+            button(key, text, col=index % 2, selected=getattr(self, 'game_looprule', '') == value)
+            if index % 2 == 1:
+                y += btn_h + gap
+        if len(loop_buttons) % 2 == 1:
+            y += btn_h + 12
+
+        section("状态")
+        display_node = self.get_display_node()
+        current_text = f"显示: 第{display_node['move_num']}步"
+        if not self.is_viewing_current_node():
+            current_text += "（历史）"
+        self.draw_text(current_text, (x, y), font_size=16, color=(80, 80, 80))
+        y += 22
+        self.draw_text(f"走棋: {self.player_name(display_node['player'])}", (x, y), font_size=16, color=(80, 80, 80))
+        y += 22
+        if self.game_result:
+            self.draw_text(self.result_text(self.game_result), (x, y), font_size=16, color=(160, 0, 0))
+            y += 22
+        elif self.ui_status:
+            self.draw_text(self.ui_status, (x, y), font_size=15, color=(80, 80, 80))
+            y += 20
+
+        if self.human_ai_phase == "playing":
+            self.draw_move_evaluation()
+
+        link_y = max(self.screen_height - 62, y + 10)
+        self.draw_text("【Dandelion Chess】发布页", (10, link_y), color=(0, 0, 255), font_size=18)
+        self.link1_rect = pygame.Rect(10, link_y, panel_w, 22)
+        self.draw_text("【KataGo修改版】发布页", (10, link_y + 26), color=(0, 0, 255), font_size=18)
+        self.link2_rect = pygame.Rect(10, link_y + 26, panel_w, 22)
 
 
     def draw_move_evaluation(self):
         """如果可用，则绘制走法评估图像和文本"""
-        if self.mode == "main" and self.analyzing and self.move_evaluation:
+        if ((self.mode == "main" and self.analyzing) or self.mode == "human_ai") and self.move_evaluation:
             eval_data = self.move_evaluation
             image_key = eval_data.get('image_key')
             image = self.eval_images.get(image_key) if image_key else None
             text = eval_data.get('text', '')
             
-            base_y = 590
+            base_y = 650 if self.mode == "main" else 640
             
             if image:
                 img_rect = image.get_rect(topleft=(20, base_y))
@@ -860,44 +1456,143 @@ class Dandelion:
         button_text = button_font.render("确定", True, (0, 0, 0))
         self.screen.blit(button_text, (button_rect.centerx - 20, button_rect.centery - 10))
 
+    def draw_kifu_panel(self, x, y, w, h):
+        self.kifu_buttons = {}
+        pygame.draw.rect(self.screen, (248, 248, 248), (x, y, w, h))
+        pygame.draw.rect(self.screen, (170, 170, 170), (x, y, w, h), 1)
+        self.draw_text("棋谱", (x + 8, y + 6), font_size=18, bold=True)
+
+        nav_y = y + 34
+        nav_w = max(40, (w - 16 - 3 * 6) // 4)
+        nav_items = [
+            ("nav_start", "|<"),
+            ("nav_prev", "<"),
+            ("nav_next", ">"),
+            ("nav_latest", ">|"),
+        ]
+        for index, (key, text) in enumerate(nav_items):
+            rect = pygame.Rect(x + 8 + index * (nav_w + 6), nav_y, nav_w, 26)
+            self.draw_panel_button(self.kifu_buttons, key, text, rect, font_size=15)
+
+        line_ids = self.displayed_line_ids()
+        move_ids = line_ids[1:]
+        selected_ply = self.kifu_nodes.get(self.view_node_id, self.kifu_nodes[0])['move_num']
+        selected_pair = max(0, (selected_ply - 1) // 2)
+        max_rows = max(3, (h - 130) // 24)
+        total_pairs = (len(move_ids) + 1) // 2
+        start_pair = max(0, min(selected_pair - max_rows // 2, max(0, total_pairs - max_rows)))
+        end_pair = min(total_pairs, start_pair + max_rows)
+
+        list_y = nav_y + 38
+        number_w = 42
+        move_w = max(72, (w - number_w - 24) // 2)
+        for pair_index in range(start_pair, end_pair):
+            row_y = list_y + (pair_index - start_pair) * 24
+            self.draw_text(f"{pair_index + 1}.", (x + 8, row_y + 3), font_size=15, color=(90, 90, 90))
+            for side_index in range(2):
+                move_pos = pair_index * 2 + side_index
+                if move_pos >= len(move_ids):
+                    continue
+                node_id = move_ids[move_pos]
+                move = self.kifu_nodes[node_id]['move']
+                rect_x = x + 8 + number_w + side_index * (move_w + 8)
+                rect = pygame.Rect(rect_x, row_y, move_w, 22)
+                selected = node_id == self.view_node_id
+                self.draw_panel_button(
+                    self.kifu_buttons,
+                    f"node_{node_id}",
+                    move.get('notation', self.move_notation(move)),
+                    rect,
+                    selected=selected,
+                    font_size=14
+                )
+
+        var_y = y + h - 58
+        pygame.draw.rect(self.screen, (238, 238, 238), (x, var_y - 6, w, 64))
+        self.draw_text("变例", (x + 8, var_y), font_size=16, bold=True)
+        branch_parent = self.kifu_nodes.get(self.view_node_id, self.kifu_nodes[0])['parent']
+        if branch_parent is None:
+            branch_parent = self.view_node_id
+        branches = self.kifu_nodes.get(branch_parent, self.kifu_nodes[0])['children'][:4]
+        bx = x + 54
+        for child_id in branches:
+            move = self.kifu_nodes[child_id]['move']
+            text = move.get('notation', self.move_notation(move)) if move else "开局"
+            rect = pygame.Rect(bx, var_y - 2, max(52, min(76, w - (bx - x) - 8)), 24)
+            self.draw_panel_button(
+                self.kifu_buttons,
+                f"branch_{child_id}",
+                text,
+                rect,
+                selected=child_id == self.view_node_id,
+                font_size=14
+            )
+            bx += rect.width + 6
+            if bx + 52 > x + w:
+                break
+
     def draw_analysis_panel(self):
         """分析信息面板"""
         panel_x = self.announce_width + self.board_width
         panel_height = self.screen_height - self.gtp_console_height
-        pygame.draw.rect(self.screen, (240, 240, 240), 
+        pygame.draw.rect(self.screen, (240, 240, 240),
                          (panel_x, 0, self.sidebar_width, panel_height))
+        pygame.draw.rect(self.screen, (170, 170, 170), (panel_x, 0, self.sidebar_width, panel_height), 1)
 
-        font = self.get_font(FONT_NAME, 16)  # 修改
-        text = font.render("选点列表", True, (0, 0, 0))
-        self.screen.blit(text, (panel_x + 10, 10))
+        font = self.get_font(FONT_NAME, 15)
+        self.draw_text("选点列表", (panel_x + 10, 10), font_size=18, bold=True)
 
-        y = 50
-        with self.analysis_lock:
-            for idx, result in enumerate(self.analysis_results[:10]):
-                text_line = f"{idx + 1}. {result['move']}: {result['winrate']:.1f}% ({result['visits']} 节点, 和棋率:{result['drawrate']:.1f}%)"
-                color = (255, 0, 0) if idx == 0 else (0, 0, 0)
-                text_surf = font.render(text_line, True, color)
-                self.screen.blit(text_surf, (panel_x + 10, y))
-                y += 30
+        y = 40
+        if not self.is_viewing_current_node():
+            self.draw_text("正在浏览历史局面", (panel_x + 10, y), font_size=16, color=(120, 70, 0))
+            self.draw_text("在棋盘落子会创建新分支", (panel_x + 10, y + 24), font_size=16, color=(120, 70, 0))
+        else:
+            with self.analysis_lock:
+                for idx, result in enumerate(self.analysis_results[:6]):
+                    text_line = f"{idx + 1}. {result['move']}: {result['winrate']:.1f}%  {result['visits']}v  和{result['drawrate']:.1f}%"
+                    color = (220, 0, 0) if idx == 0 else (0, 0, 0)
+                    text_surf = font.render(text_line, True, color)
+                    self.screen.blit(text_surf, (panel_x + 10, y))
+                    y += 24
+            if y == 40:
+                self.draw_text("等待分析...", (panel_x + 10, y), font_size=16, color=(80, 80, 80))
 
-        situation_y = self.screen_height - self.gtp_console_height - 80
+        situation_y = panel_height - 76
+        kifu_y = 198
+        kifu_h = max(160, situation_y - kifu_y - 10)
+        self.draw_kifu_panel(panel_x + 8, kifu_y, self.sidebar_width - 16, kifu_h)
+
         pygame.draw.rect(self.screen, (220, 220, 220),
-                        (panel_x, situation_y, self.sidebar_width, 80))
+                        (panel_x, situation_y, self.sidebar_width, 76))
 
-        situation_text, text_color, score_text, score_color = self.get_situation_text()
+        if not self.is_viewing_current_node():
+            display_node = self.get_display_node()
+            situation_text = f"历史第{display_node['move_num']}步"
+            text_color = (120, 70, 0)
+            score_text = "谱"
+            score_color = text_color
+        else:
+            situation_text, text_color, score_text, score_color = self.get_situation_text()
 
-        font = self.get_font(FONT_NAME, 32, bold=False)  # 修改
+        font = self.get_font(FONT_NAME, 30, bold=False)
         score_surf = font.render(score_text, True, score_color)
-        score_rect = score_surf.get_rect(center=(panel_x + 50, situation_y + 40))
+        score_rect = score_surf.get_rect(center=(panel_x + 46, situation_y + 38))
         self.screen.blit(score_surf, score_rect)
 
-        font = self.get_font(FONT_NAME, 24, bold=True)  # 修改
+        font = self.get_font(FONT_NAME, 22, bold=True)
         text_surf = font.render(situation_text, True, text_color)
-        text_rect = text_surf.get_rect(center=(panel_x + self.sidebar_width // 2, situation_y + 40))
+        text_rect = text_surf.get_rect(center=(panel_x + self.sidebar_width // 2 + 20, situation_y + 38))
         self.screen.blit(text_surf, text_rect)
 
     def get_situation_text(self):
         """根据胜率返回形势判断文本和颜色，以及分数文本和颜色"""
+        if self.game_result:
+            if self.game_result.get('type') == 'draw':
+                return self.result_text(self.game_result), (0, 0, 0), "和", (0, 0, 0)
+            winner = self.game_result.get('winner')
+            color = (0, 66, 255) if winner == 'w' else (200, 0, 0)
+            return self.result_text(self.game_result), color, "胜", color
+
         with self.analysis_lock:
             if not self.analysis_results:
                 return "分析中...", (0, 0, 0), "0.0", (0, 0, 0)
@@ -991,7 +1686,10 @@ class Dandelion:
             self.screen.blit(font.render(f"蓝保守", True, (0, 66, 255)), (x0 + 140, y))
 
         y += 25
-        self.screen.blit(font.render(f"当前步数：{self.current_movenum}, 还有{self.movenum_limit - self.current_movenum}步强制判和", True, (0, 0, 0)), (x0 + 10, y))
+        if self.game_result:
+            self.screen.blit(font.render(self.result_text(self.game_result), True, (200, 0, 0) if self.game_result.get('winner') == 'b' else (0, 66, 255) if self.game_result.get('winner') == 'w' else (0, 0, 0)), (x0 + 10, y))
+        else:
+            self.screen.blit(font.render(f"当前步数：{self.current_movenum}, 还有{DRAW_MOVE_LIMIT - self.current_movenum}步强制判和", True, (0, 0, 0)), (x0 + 10, y))
         y += 25
         self.screen.blit(font.render(f"按↑↓增减，调低步数有利于快速取胜", True, (0, 0, 0)), (x0 + 10, y))
 
@@ -1110,11 +1808,18 @@ class Dandelion:
             return
         self.analysis_results.clear()
         if send_command:
+            if self.mode == "human_ai":
+                self.try_send_command("stop")
             self.try_send_command("undo")
-            if self.analyzing:
+            if self.mode != "human_ai" and self.analyzing:
                 self.try_send_command(GTP_COMMAND_ANALYZE)
 
     def mouse_click_loc(self, col, row):
+        if self.game_result:
+            return
+        if not self.is_viewing_current_node():
+            self.activate_view_node_for_branch(restart_analysis=False)
+
         if self.flip_board:
             col, row = COLS - 1 - col, ROWS - 1 - row
 
@@ -1133,7 +1838,9 @@ class Dandelion:
                         start_col, start_row = chr(col + ord('A')), 9 - row
                         self.try_send_command(f"play {color} {start_col}{start_row}\n")
                         self.analysis_results.clear()
-                        if self.analyzing:
+                        if self.mode == "human_ai":
+                            self.start_human_ai_evaluation_analysis()
+                        elif self.analyzing:
                             self.try_send_command(GTP_COMMAND_ANALYZE)
         else:
             if 0 <= row < ROWS and 0 <= col < COLS:
@@ -1152,24 +1859,31 @@ class Dandelion:
                     start_col, start_row = chr(sc + ord('A')), 9 - sr
                     end_col, end_row = chr(col + ord('A')), 9 - row
                     color = 'B' if self.current_player == 'w' else 'W'
+                    if self.mode == "human_ai":
+                        self.try_send_command("stop")
                     self.try_send_command(f"play {color} {end_col}{end_row}")
                     self.analysis_results.clear()
-                    if self.analyzing:
-                        self.try_send_command(GTP_COMMAND_ANALYZE)
 
-                    self.evaluate_move(pre_move_analysis, user_move_coords)
+                    self.evaluate_move(pre_move_analysis, user_move_coords, force=(self.mode == "human_ai"))
 
                     self.last_move = ((sr, sc), (row, col))
                     self.current_movenum += 1
-                    
-                    self.move_history.append({
+
+                    move_record = {
                         'start': (sr, sc), 'end': (row, col),
                         'piece': self.board[row][col], 'captured': captured_piece,
-                        'player': self.current_player
-                    })
-                    
+                        'player': self.current_player,
+                        'source': 'human' if self.mode == "human_ai" else 'manual'
+                    }
+                      
                     self.current_player = 'b' if self.current_player == 'w' else 'w'
+                    self.record_move_in_kifu(move_record)
                     print(f"Current FEN: {self.get_fen()}")
+                    result = self.update_game_result()
+                    if result:
+                        self.try_send_command("stop")
+                    elif self.analyzing:
+                        self.try_send_command(GTP_COMMAND_ANALYZE)
 
             self.analysis_results.clear()
             self.selected_piece = None
@@ -1178,10 +1892,15 @@ class Dandelion:
         """悔棋功能：撤销上一步移动"""
         if self.selected_piece is not None:
             return
-        if not self.move_history:
+        if self.current_node_id == 0 or self.current_node_id not in self.kifu_nodes:
             return
-            
-        last_move = self.move_history.pop()
+
+        current_node = self.kifu_nodes[self.current_node_id]
+        last_move = current_node['move']
+        parent_id = current_node['parent']
+        if last_move is None or parent_id is None:
+            return
+
         sr, sc = last_move['start']
         er, ec = last_move['end']
         
@@ -1190,16 +1909,613 @@ class Dandelion:
             
         self.current_player = last_move['player']
         self.selected_piece = None
-        self.last_move = None
+        self.current_node_id = parent_id
+        self.view_node_id = parent_id
+        self.kifu_line_leaf_id = parent_id
+        self.move_history = self.get_move_path(parent_id)
+        self.last_move = self.kifu_nodes[parent_id]['last_move']
         self.move_evaluation = None # 清除走法评估
-        self.current_movenum -= 1
+        self.current_movenum = self.kifu_nodes[parent_id]['move_num']
         
         self.try_send_command("undo")
         self.try_send_command("undo")
-        
+         
         self.analysis_results.clear()
-        if self.analyzing:
+        result = self.update_game_result()
+        if result:
+            self.try_send_command("stop")
+        elif self.analyzing:
             self.try_send_command(GTP_COMMAND_ANALYZE)
+
+    def toggle_analysis(self):
+        self.analyzing = not self.analyzing
+        if self.analyzing:
+            with self.analysis_lock:
+                self.analysis_results.clear()
+            self.try_send_command(GTP_COMMAND_ANALYZE)
+            self.ui_status = "分析已继续"
+        else:
+            self.try_send_command("stop")
+            self.ui_status = "分析已暂停"
+
+    def toggle_lion_rat_rule(self):
+        rule = {0: 2, 1: 3, 2: 0, 3: 1}.get(self.game_rule, 0)
+        self.set_game_rule(rule=rule)
+
+    def toggle_rat_capture_rule(self):
+        rule = {0: 1, 1: 0, 2: 3, 3: 2}.get(self.game_rule, 0)
+        self.set_game_rule(rule=rule)
+
+    def quick_play_best_move(self):
+        if not self.is_viewing_current_node():
+            self.activate_view_node_for_branch(restart_analysis=True)
+            self.ui_status = "已同步历史局面，请等待分析后快速出招"
+            return
+        if self.analyzing and self.selected_piece is None:
+            with self.analysis_lock:
+                if not self.analysis_results:
+                    self.ui_status = "暂无可用分析结果"
+                    return
+                analysis_snapshot = [result.copy() for result in self.analysis_results]
+            if not self.play_best_analysis_move(analysis_snapshot, source="quick"):
+                self.ui_status = "无可用着法"
+
+    def enter_editor_mode(self):
+        self.mode = "editor"
+        self.board = [row.copy() for row in self.initial_board]
+        self.current_player = 'w'
+        self.analyzing = False
+        self.try_send_command("stop")
+
+    def handle_main_action(self, key):
+        if key == "toggle_analysis":
+            self.toggle_analysis()
+        elif key == "restart":
+            self.restart_game()
+        elif key == "swap_side":
+            self.swap_side()
+        elif key == "aggr_balance":
+            self.set_aggressive_mode(0)
+        elif key == "aggr_blue":
+            self.set_aggressive_mode(1)
+        elif key == "aggr_red":
+            self.set_aggressive_mode(-1)
+        elif key == "toggle_lion_rat":
+            self.toggle_lion_rat_rule()
+        elif key == "toggle_rat_capture":
+            self.toggle_rat_capture_rule()
+        elif key == "undo":
+            self.undo_move()
+        elif key == "move_limit_up":
+            self.set_movelimit(self.movenum_limit + 8)
+        elif key == "move_limit_down":
+            self.set_movelimit(self.movenum_limit - 8)
+        elif key == "flip":
+            self.flip_board = not self.flip_board
+        elif key == "fen":
+            self.prompt_for_fen()
+        elif key == "draw_draw":
+            self.set_game_drawrule("DRAW")
+        elif key == "draw_count":
+            self.set_game_drawrule("COUNT")
+        elif key == "draw_weight":
+            self.set_game_drawrule("WEIGHT")
+        elif key == "loop_seventhree":
+            self.set_game_looprule("seventhree")
+        elif key == "loop_fivetwo":
+            self.set_game_looprule("fivetwo")
+        elif key == "loop_twoone":
+            self.set_game_looprule("twoone")
+        elif key == "loop_repeatend":
+            self.set_game_looprule("repeatend")
+        elif key == "loop_none":
+            self.set_game_looprule("none")
+        elif key == "simple_mode":
+            self.simple_mode = not self.simple_mode
+        elif key == "quick_move":
+            self.quick_play_best_move()
+        elif key == "human_ai":
+            self.enter_human_ai_setup()
+        elif key == "editor":
+            self.enter_editor_mode()
+
+    def handle_main_key(self, key):
+        key_actions = {
+            pygame.K_SPACE: "toggle_analysis",
+            pygame.K_0: "restart",
+            pygame.K_1: "swap_side",
+            pygame.K_2: "aggr_balance",
+            pygame.K_3: "aggr_blue",
+            pygame.K_4: "aggr_red",
+            pygame.K_5: "toggle_lion_rat",
+            pygame.K_6: "toggle_rat_capture",
+            pygame.K_7: "undo",
+            pygame.K_UP: "move_limit_up",
+            pygame.K_DOWN: "move_limit_down",
+            pygame.K_8: "flip",
+            pygame.K_9: "fen",
+            pygame.K_i: "draw_draw",
+            pygame.K_o: "draw_count",
+            pygame.K_p: "draw_weight",
+            pygame.K_g: "loop_seventhree",
+            pygame.K_h: "loop_fivetwo",
+            pygame.K_j: "loop_twoone",
+            pygame.K_k: "loop_repeatend",
+            pygame.K_l: "loop_none",
+            pygame.K_a: "simple_mode",
+            pygame.K_w: "quick_move",
+        }
+        action = key_actions.get(key)
+        if action:
+            self.handle_main_action(action)
+
+    def handle_kifu_click(self, x, y):
+        for key, entry in self.kifu_buttons.items():
+            rect = entry['rect']
+            if not rect.collidepoint(x, y):
+                continue
+            if entry.get('disabled'):
+                return True
+            if key == "nav_start":
+                self.kifu_nav_start()
+            elif key == "nav_prev":
+                self.kifu_nav_prev()
+            elif key == "nav_next":
+                self.kifu_nav_next()
+            elif key == "nav_latest":
+                self.kifu_nav_latest()
+            elif key.startswith("node_"):
+                self.set_view_node(int(key.split("_")[1]))
+            elif key.startswith("branch_"):
+                self.set_view_node(int(key.split("_")[1]), update_line=True)
+            return True
+        return False
+
+    def handle_main_click(self, x, y):
+        for key, entry in self.main_buttons.items():
+            if entry['rect'].collidepoint(x, y):
+                if not entry.get('disabled'):
+                    self.handle_main_action(key)
+                return
+
+        if self.handle_kifu_click(x, y):
+            return
+
+        if hasattr(self, 'link1_rect') and self.link1_rect.collidepoint(x, y):
+            webbrowser.open("https://github.com/lxsgx23/Dandelion-Chess")
+            return
+        if hasattr(self, 'link2_rect') and self.link2_rect.collidepoint(x, y):
+            webbrowser.open("https://github.com/hzyhhzy/KataGomo/tree/AnimalChess2025")
+            return
+
+        if self.announce_width <= x < self.announce_width + self.board_width and 0 <= y < self.board_height:
+            col = (x - self.announce_width) // self.tile_size
+            row = y // self.tile_size
+            if not self.is_viewing_current_node():
+                self.activate_view_node_for_branch(restart_analysis=False)
+            self.mouse_click_loc(col, row)
+
+    # ================= 人机对弈相关方法 =================
+    def enter_human_ai_setup(self):
+        if self.selected_piece is not None:
+            self.unselect()
+        self.mode = "human_ai"
+        self.human_ai_phase = "setup"
+        self.analyzing = False
+        self.human_ai_ai_thinking = False
+        self.human_ai_game_over = False
+        self.human_ai_status = "请选择执棋方、难度和开局方式"
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+        self.try_send_command("stop")
+
+    def exit_human_ai_to_main(self):
+        if self.selected_piece is not None:
+            self.unselect()
+        self.mode = "main"
+        self.human_ai_phase = "setup"
+        self.human_ai_ai_thinking = False
+        self.human_ai_game_over = False
+        self.analyzing = True
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+        self.try_send_command("stop")
+        self.try_send_command(f"kata-set-param maxVisits {NORMAL_MAX_VISITS}")
+        result = self.update_game_result()
+        if result:
+            self.try_send_command("stop")
+        else:
+            self.try_send_command(GTP_COMMAND_ANALYZE)
+
+    def set_human_ai_difficulty(self, index):
+        if not (0 <= index < len(HUMAN_AI_DIFFICULTIES)):
+            return
+        self.human_ai_difficulty_index = index
+        name, visits = HUMAN_AI_DIFFICULTIES[index]
+        if not self.human_ai_ai_thinking:
+            self.human_ai_ai_target_visits = visits
+        suffix = "，下一手AI生效" if self.human_ai_ai_thinking else ""
+        self.human_ai_status = f"难度已切换为{name}（{visits} visits）{suffix}"
+
+    def start_human_ai_game(self, use_current_position):
+        if self.selected_piece is not None:
+            self.unselect()
+
+        self.analyzing = False
+        self.human_ai_phase = "playing"
+        self.human_ai_ai_thinking = False
+        self.human_ai_game_over = False
+        self.human_ai_root_visits = 0
+        self.human_ai_display_visits = 0
+        self.analysis_root_visits = 0
+        self.game_result = None
+        self.move_evaluation = None
+        self.current_movenum = 0
+        self.selected_piece = None
+        self.last_move = None
+        self.movenum_limit = 300
+
+        if not use_current_position:
+            self.board = [row.copy() for row in self.initial_board]
+            self.current_player = 'w'
+        self.reset_kifu_tree(self.board, self.current_player)
+
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+
+        self.try_send_command("stop")
+        self.try_send_command("setfen " + self.get_fen())
+        self.try_send_command("mm 300")
+        self.try_send_command("mc 0")
+
+        result = self.update_game_result()
+        if result:
+            self.try_send_command("stop")
+        elif self.current_player == self.human_ai_player:
+            self.human_ai_status = f"轮到玩家（{self.player_name(self.human_ai_player)}）"
+        else:
+            self.human_ai_status = f"AI（{self.player_name(get_opp(self.human_ai_player))}）先行"
+            self.start_human_ai_search()
+
+    def start_human_ai_search(self):
+        ai_player = get_opp(self.human_ai_player)
+        if self.mode != "human_ai" or self.human_ai_phase != "playing":
+            return
+        if self.game_result or self.human_ai_game_over or self.current_player != ai_player:
+            return
+
+        name, visits = HUMAN_AI_DIFFICULTIES[self.human_ai_difficulty_index]
+        self.human_ai_ai_thinking = True
+        self.human_ai_ai_target_visits = visits
+        self.human_ai_root_visits = 0
+        self.human_ai_display_visits = 0
+        self.human_ai_status = f"AI思考中：{name}（目标 {visits} visits）"
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+
+        self.try_send_command("stop")
+        self.try_send_command(f"kata-set-param maxVisits {visits}")
+        self.try_send_command(HUMAN_AI_ANALYZE_COMMAND)
+
+    def start_human_ai_evaluation_analysis(self):
+        if self.mode != "human_ai" or self.human_ai_phase != "playing":
+            return
+        if self.game_result or self.human_ai_game_over or self.human_ai_ai_thinking:
+            return
+        if self.current_player != self.human_ai_player or self.selected_piece is None:
+            return
+
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+
+        self.human_ai_status = f"正在评估玩家着法（{HUMAN_AI_EVALUATION_VISITS} visits）"
+        self.try_send_command("stop")
+        self.try_send_command(f"kata-set-param maxVisits {HUMAN_AI_EVALUATION_VISITS}")
+        self.try_send_command(HUMAN_AI_ANALYZE_COMMAND)
+
+    def update_human_ai(self):
+        if self.mode != "human_ai" or self.human_ai_phase != "playing":
+            return
+        if self.game_result:
+            self.human_ai_game_over = True
+            self.human_ai_ai_thinking = False
+            self.human_ai_status = self.result_text(self.game_result)
+            return
+        if self.human_ai_game_over:
+            return
+
+        ai_player = get_opp(self.human_ai_player)
+        if self.current_player == self.human_ai_player:
+            if not self.human_ai_ai_thinking and self.selected_piece is None:
+                self.human_ai_status = f"轮到玩家（{self.player_name(self.human_ai_player)}）"
+            return
+
+        if self.current_player != ai_player:
+            return
+
+        if not self.human_ai_ai_thinking:
+            self.start_human_ai_search()
+            return
+
+        with self.analysis_lock:
+            analysis_snapshot = [result.copy() for result in self.analysis_results]
+            root_visits = self.human_ai_root_visits
+            total_visits = sum(result.get('visits', 0) for result in analysis_snapshot)
+            max_child_visits = max([result.get('visits', 0) for result in analysis_snapshot], default=0)
+
+        target = self.human_ai_ai_target_visits
+        progress_visits = root_visits if root_visits > 0 else max(total_visits, max_child_visits)
+        self.human_ai_display_visits = progress_visits
+        if progress_visits > 0:
+            self.human_ai_status = f"AI思考中：{progress_visits}/{target} visits"
+
+        reached_by_root = root_visits >= target
+        reached_by_children = root_visits == 0 and (total_visits >= target or max_child_visits >= target)
+        if reached_by_root or reached_by_children:
+            self.finish_human_ai_ai_move(analysis_snapshot)
+
+    def finish_human_ai_ai_move(self, analysis_snapshot):
+        self.try_send_command("stop")
+        self.human_ai_ai_thinking = False
+
+        if self.play_best_analysis_move(analysis_snapshot, source="ai"):
+            if self.game_result:
+                self.human_ai_game_over = True
+                self.human_ai_status = self.result_text(self.game_result)
+                return
+            self.human_ai_status = f"AI已落子，轮到玩家（{self.player_name(self.human_ai_player)}）"
+        else:
+            self.human_ai_game_over = True
+            self.human_ai_status = "无可用着法/对局可能结束"
+
+    def human_ai_undo(self):
+        if self.human_ai_phase != "playing":
+            return
+
+        if self.human_ai_ai_thinking:
+            self.try_send_command("stop")
+            self.human_ai_ai_thinking = False
+
+        if self.selected_piece is not None:
+            self.unselect()
+            self.human_ai_status = "已取消选中"
+            return
+
+        if not self.move_history:
+            self.human_ai_status = "没有可悔棋的步"
+            return
+
+        last_source = self.move_history[-1].get('source')
+        undo_count = 2 if last_source == "ai" and len(self.move_history) >= 2 else 1
+        for _ in range(undo_count):
+            if self.move_history:
+                self.undo_move()
+
+        with self.analysis_lock:
+            self.analysis_results.clear()
+            self.analysis_root_visits = 0
+            self.human_ai_root_visits = 0
+            self.human_ai_display_visits = 0
+
+        result = self.update_game_result()
+        self.human_ai_game_over = bool(result)
+        self.human_ai_status = self.result_text(result) if result else "已悔棋"
+
+    def draw_human_ai_button(self, key, text, rect, selected=False, disabled=False):
+        self.human_ai_buttons[key] = rect
+        if disabled:
+            fill = (170, 170, 170)
+        elif selected:
+            fill = (120, 180, 240)
+        else:
+            fill = (210, 210, 210)
+        pygame.draw.rect(self.screen, fill, rect)
+        pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
+        self.draw_text(text, (rect.centerx, rect.centery), anchor='center', color=(0, 0, 0), font_size=18)
+
+    def draw_human_ai_board_only(self):
+        display_node = self.get_display_node()
+        display_board = display_node['board']
+        display_last_move = display_node['last_move']
+        viewing_current = self.is_viewing_current_node()
+
+        self.screen.blit(self.board_img, (self.announce_width, 0))
+
+        if display_last_move:
+            start, end = display_last_move
+            s_row, s_col = self.flip_coord(start[0], start[1])
+            e_row, e_col = self.flip_coord(end[0], end[1])
+            pygame.draw.rect(self.screen, (0, 255, 0),
+                             (self.announce_width + s_col * self.tile_size, s_row * self.tile_size,
+                              self.tile_size, self.tile_size), 3)
+            pygame.draw.rect(self.screen, (0, 0, 255),
+                             (self.announce_width + e_col * self.tile_size, e_row * self.tile_size,
+                              self.tile_size, self.tile_size), 3)
+
+        if viewing_current and self.selected_piece:
+            row, col = self.selected_piece
+            row, col = self.flip_coord(row, col)
+            pygame.draw.rect(self.screen, (255, 0, 0),
+                             (self.announce_width + col * self.tile_size, row * self.tile_size,
+                              self.tile_size, self.tile_size), 3)
+
+        for row in range(ROWS):
+            for col in range(COLS):
+                piece = display_board[row][col]
+                if piece != ' ':
+                    flip_row, flip_col = self.flip_coord(row, col)
+                    img = self.piece_images[piece]
+                    rect = img.get_rect(center=(
+                        self.announce_width + flip_col * self.tile_size + self.tile_size // 2,
+                        flip_row * self.tile_size + self.tile_size // 2
+                    ))
+                    self.screen.blit(img, rect)
+
+    def draw_human_ai_controls(self):
+        self.human_ai_buttons = {}
+        pygame.draw.rect(self.screen, (240, 240, 240), (0, 0, self.announce_width, self.screen_height))
+        pygame.draw.rect(self.screen, (0, 0, 0), (0, 0, self.announce_width, self.screen_height), 2)
+
+        self.draw_text("人机对弈", (10, 10), font_size=24)
+        self.draw_text(self.human_ai_status, (10, 48), font_size=16, color=(40, 40, 40))
+
+        if self.human_ai_phase == "setup":
+            self.draw_text("玩家执棋：", (10, 90), font_size=18)
+            self.draw_human_ai_button("side_w", "玩家执蓝", pygame.Rect(10, 120, 180, 36), self.human_ai_player == 'w')
+            self.draw_human_ai_button("side_b", "玩家执红", pygame.Rect(10, 164, 180, 36), self.human_ai_player == 'b')
+
+            self.draw_text("难度：", (10, 220), font_size=18)
+            for idx, (name, visits) in enumerate(HUMAN_AI_DIFFICULTIES):
+                y = 250 + idx * 42
+                selected = idx == self.human_ai_difficulty_index
+                self.draw_human_ai_button(f"difficulty_{idx}", f"{name} {visits}", pygame.Rect(10, y, 180, 34), selected)
+
+            self.draw_human_ai_button("start_current", "从当前局面开始", pygame.Rect(10, 480, 180, 40))
+            self.draw_human_ai_button("start_standard", "标准开局开始", pygame.Rect(10, 530, 180, 40))
+            self.draw_human_ai_button("back_main", "返回分析页", pygame.Rect(10, 590, 180, 40))
+        else:
+            player_text = f"玩家：{self.player_name(self.human_ai_player)}"
+            ai_text = f"AI：{self.player_name(get_opp(self.human_ai_player))}"
+            self.draw_text(player_text, (10, 92), font_size=18)
+            self.draw_text(ai_text, (10, 120), font_size=18)
+            self.draw_text(f"当前：{self.player_name(self.current_player)}", (10, 148), font_size=18)
+
+            self.draw_text("难度：", (10, 190), font_size=18)
+            for idx, (name, visits) in enumerate(HUMAN_AI_DIFFICULTIES):
+                y = 220 + idx * 38
+                selected = idx == self.human_ai_difficulty_index
+                self.draw_human_ai_button(f"difficulty_{idx}", f"{name} {visits}", pygame.Rect(10, y, 180, 32), selected)
+
+            self.draw_human_ai_button("undo", "悔棋", pygame.Rect(10, 440, 180, 38))
+            self.draw_human_ai_button("restart_ai", "重新开始", pygame.Rect(10, 488, 180, 38))
+            self.draw_human_ai_button("flip_ai", "翻转棋盘", pygame.Rect(10, 536, 180, 38))
+            self.draw_human_ai_button("back_main", "返回分析页", pygame.Rect(10, 594, 180, 40))
+
+        self.draw_move_evaluation()
+
+    def draw_human_ai_status_panel(self):
+        panel_x = self.announce_width + self.board_width
+        pygame.draw.rect(self.screen, (240, 240, 240), (panel_x, 0, self.sidebar_width, self.screen_height))
+        pygame.draw.rect(self.screen, (0, 0, 0), (panel_x, 0, self.sidebar_width, self.screen_height), 2)
+
+        name, visits = HUMAN_AI_DIFFICULTIES[self.human_ai_difficulty_index]
+        display_node = self.get_display_node()
+        self.draw_text("对弈信息", (panel_x + 10, 10), font_size=24)
+        self.draw_text(f"玩家方：{self.player_name(self.human_ai_player)}", (panel_x + 10, 60), font_size=20)
+        self.draw_text(f"AI方：{self.player_name(get_opp(self.human_ai_player))}", (panel_x + 10, 92), font_size=20)
+        self.draw_text(f"难度：{name}（{visits} visits）", (panel_x + 10, 124), font_size=20)
+        self.draw_text(f"当前走棋：{self.player_name(display_node['player'])}", (panel_x + 10, 156), font_size=20)
+        step_text = f"步数：{display_node['move_num']}"
+        if not self.is_viewing_current_node():
+            step_text += "（历史）"
+        self.draw_text(step_text, (panel_x + 10, 188), font_size=20)
+
+        if self.human_ai_ai_thinking:
+            self.draw_text(f"AI搜索：{self.human_ai_display_visits}/{self.human_ai_ai_target_visits}", (panel_x + 10, 230), font_size=20, color=(200, 0, 0))
+        elif self.game_result:
+            result_color = (0, 66, 255) if self.game_result.get('winner') == 'w' else (200, 0, 0) if self.game_result.get('winner') == 'b' else (0, 0, 0)
+            self.draw_text(self.result_text(self.game_result), (panel_x + 10, 230), font_size=20, color=result_color)
+        elif self.human_ai_game_over:
+            self.draw_text("对局可能已结束", (panel_x + 10, 230), font_size=20, color=(200, 0, 0))
+        else:
+            self.draw_text(self.human_ai_status, (panel_x + 10, 230), font_size=20, color=(0, 100, 0))
+
+        self.draw_kifu_panel(panel_x + 10, 282, self.sidebar_width - 20, max(160, self.screen_height - 302))
+
+    def draw_human_ai(self):
+        self.screen.fill((255, 255, 255))
+        self.draw_human_ai_controls()
+        self.draw_human_ai_board_only()
+        self.draw_human_ai_status_panel()
+        if self.show_error_dialog:
+            self.draw_error_dialog()
+
+    def handle_human_ai_click(self, x, y):
+        for key, rect in self.human_ai_buttons.items():
+            if rect.collidepoint(x, y):
+                if key == "side_w":
+                    self.human_ai_player = 'w'
+                    self.human_ai_status = "玩家执蓝"
+                elif key == "side_b":
+                    self.human_ai_player = 'b'
+                    self.human_ai_status = "玩家执红"
+                elif key.startswith("difficulty_"):
+                    self.set_human_ai_difficulty(int(key.split("_")[1]))
+                elif key == "start_current":
+                    self.start_human_ai_game(use_current_position=True)
+                elif key == "start_standard":
+                    self.start_human_ai_game(use_current_position=False)
+                elif key == "back_main":
+                    self.exit_human_ai_to_main()
+                elif key == "undo":
+                    self.human_ai_undo()
+                elif key == "restart_ai":
+                    self.start_human_ai_game(use_current_position=False)
+                elif key == "flip_ai":
+                    self.flip_board = not self.flip_board
+                return
+
+        if self.handle_kifu_click(x, y):
+            return
+
+        if self.human_ai_phase != "playing":
+            return
+        if not (self.announce_width <= x < self.announce_width + self.board_width and 0 <= y < self.board_height):
+            return
+
+        if self.game_result or self.human_ai_game_over:
+            self.human_ai_status = self.result_text(self.game_result) if self.game_result else "对局可能已结束"
+            return
+        if not self.is_viewing_current_node():
+            if self.human_ai_ai_thinking:
+                self.human_ai_status = "AI思考中，不能从历史局面创建分支"
+                return
+            self.activate_view_node_for_branch(restart_analysis=False)
+            if self.game_result:
+                self.human_ai_game_over = True
+                self.human_ai_status = self.result_text(self.game_result)
+                return
+            if self.current_player != self.human_ai_player:
+                self.human_ai_status = "已切到历史分支，轮到AI"
+                self.start_human_ai_search()
+                return
+        if self.human_ai_ai_thinking or self.current_player != self.human_ai_player:
+            self.human_ai_status = "请等待AI落子"
+            return
+
+        col = (x - self.announce_width) // self.tile_size
+        row = y // self.tile_size
+        before_player = self.current_player
+        before_selected = self.selected_piece
+        self.mouse_click_loc(col, row)
+        if before_selected is not None and self.selected_piece is None and self.current_player != before_player:
+            self.human_ai_status = f"AI思考中：目标 {HUMAN_AI_DIFFICULTIES[self.human_ai_difficulty_index][1]} visits"
+
+    def handle_human_ai_key(self, key):
+        if key == pygame.K_ESCAPE:
+            self.exit_human_ai_to_main()
+        elif key == pygame.K_0:
+            self.start_human_ai_game(use_current_position=False)
+        elif key == pygame.K_7:
+            self.human_ai_undo()
+        elif key == pygame.K_8:
+            self.flip_board = not self.flip_board
+        elif pygame.K_1 <= key <= pygame.K_5:
+            self.set_human_ai_difficulty(key - pygame.K_1)
 
     # ================= 棋盘编辑器相关方法 =================
     def draw_editor(self):
@@ -1399,25 +2715,11 @@ class Dandelion:
                         if button_rect.collidepoint(x, y):
                             self.show_error_dialog = False
                     elif self.mode == "main":
-                        if hasattr(self, 'link1_rect') and self.link1_rect.collidepoint(x, y):
-                            webbrowser.open("https://github.com/lxsgx23/Dandelion-Chess")
-                        elif hasattr(self, 'link2_rect') and self.link2_rect.collidepoint(x, y):
-                            webbrowser.open("https://github.com/hzyhhzy/KataGomo/tree/AnimalChess2025")
-                            
-                        editor_button_rect = pygame.Rect(10, 310, 180, 40)
-                        if editor_button_rect.collidepoint(x, y):
-                            self.mode = "editor"
-                            self.board = [row.copy() for row in self.initial_board]
-                            self.current_player = 'w'
-                            self.analyzing = False
-                            self.try_send_command("stop")
-                            continue
-                        
-                        if x > self.announce_width:
-                            col = (x - self.announce_width) // self.tile_size
-                            row = y // self.tile_size
-                            self.mouse_click_loc(col, row)
-                    
+                        self.handle_main_click(x, y)
+
+                    elif self.mode == "human_ai":
+                        self.handle_human_ai_click(x, y)
+                     
                     elif self.mode == "editor":
                         button_rect = pygame.Rect(10, 250, 180, 40)
                         if button_rect.collidepoint(x, y):
@@ -1440,135 +2742,20 @@ class Dandelion:
                 
                 elif event.type == pygame.KEYDOWN:
                     if self.mode == "main":
-                        if event.key == pygame.K_SPACE:
-                            self.analyzing = not self.analyzing
-                            if self.analyzing:
-                                with self.analysis_lock:
-                                    self.analysis_results.clear()
-                                self.try_send_command(GTP_COMMAND_ANALYZE)
-                            else:
-                                self.try_send_command("stop")
-                            self.katago_process.stdin.flush()
-                        elif event.key == pygame.K_0:
-                            self.restart_game()
-                        elif event.key == pygame.K_1:
-                            self.swap_side()
-                        elif event.key == pygame.K_2:
-                            self.set_aggressive_mode(0)
-                        elif event.key == pygame.K_3:
-                            self.set_aggressive_mode(1)
-                        elif event.key == pygame.K_4:
-                            self.set_aggressive_mode(-1)
-                        elif event.key == pygame.K_5:  # 狮子是否能跳过己方老鼠
-                            rule = None
-                            if self.game_rule == 0:
-                                rule = 2
-                            elif self.game_rule == 1:
-                                rule = 3
-                            elif self.game_rule == 2:
-                                rule = 0
-                            elif self.game_rule == 3:
-                                rule = 1
-                            self.set_game_rule(rule=rule)
-                        elif event.key == pygame.K_6:  # 河里和陆上的老鼠是否能互吃
-                            rule = None
-                            if self.game_rule == 0:
-                                rule = 1
-                            elif self.game_rule == 1:
-                                rule = 0
-                            elif self.game_rule == 2:
-                                rule = 3
-                            elif self.game_rule == 3:
-                                rule = 2
-                            self.set_game_rule(rule=rule)
-                        elif event.key == pygame.K_7:
-                            self.undo_move()
-                        elif event.key == pygame.K_UP:
-                            self.set_movelimit(self.movenum_limit + 8)
-                        elif event.key == pygame.K_DOWN:
-                            self.set_movelimit(self.movenum_limit - 8)
-                        elif event.key == pygame.K_8:
-                            self.flip_board = not self.flip_board
-                        elif event.key == pygame.K_9:
-                            self.prompt_for_fen()
-                        elif event.key == pygame.K_i:
-                            self.set_game_drawrule("DRAW")
-                        elif event.key == pygame.K_o:
-                            self.set_game_drawrule("COUNT")
-                        elif event.key == pygame.K_p:
-                            self.set_game_drawrule("WEIGHT")
-                        elif event.key == pygame.K_g:
-                            self.set_game_looprule("seventhree")
-                        elif event.key == pygame.K_h:
-                            self.set_game_looprule("fivetwo")
-                        elif event.key == pygame.K_j:
-                            self.set_game_looprule("twoone")
-                        elif event.key == pygame.K_k:
-                            self.set_game_looprule("repeatend")
-                        elif event.key == pygame.K_l:
-                            self.set_game_looprule("none")
-                        elif event.key == pygame.K_a:
-                            self.simple_mode = not self.simple_mode
-                        elif event.key == pygame.K_w:
-                            if self.analyzing and self.selected_piece is None:
-                                with self.analysis_lock:
-                                    if not self.analysis_results:
-                                        continue
-                                    
-                                    best_move = next((r for r in self.analysis_results if r.get('order') == 0), None)
-                                    if not best_move:
-                                        best_move = self.analysis_results[0]
-                                    
-                                    pv_moves = best_move.get('pv', '').split()
-                                    if len(pv_moves) < 2:
-                                        continue
-
-                                    start_move_str = pv_moves[0]
-                                    end_move_str = pv_moves[1]
-                                
-                                sc, sr = movestr_to_pos(start_move_str)
-                                ec, er = movestr_to_pos(end_move_str)
-                                
-                                if sr is None or er is None:
-                                    continue
-
-                                piece = self.board[sr][sc]
-                                if piece == ' ' or \
-                                   (self.current_player == 'w' and piece.islower()) or \
-                                   (self.current_player == 'b' and piece.isupper()):
-                                    print(f"Engine suggested an invalid move for player {self.current_player}: moving piece '{piece}' at {start_move_str}")
-                                    continue
-                                
-                                captured_piece = self.board[er][ec] if self.board[er][ec] != ' ' else None
-                                self.board[er][ec] = self.board[sr][sc]
-                                self.board[sr][sc] = ' '
-                                
-                                self.last_move = ((sr, sc), (er, ec))
-                                self.current_movenum += 1
-                                self.move_history.append({
-                                    'start': (sr, sc), 'end': (er, ec),
-                                    'piece': self.board[er][ec], 'captured': captured_piece,
-                                    'player': self.current_player
-                                })
-                                
-                                player_before_move = self.current_player
-                                self.current_player = get_opp(self.current_player)
-                                self.selected_piece = None
-                                self.move_evaluation = None
-
-                                color = 'B' if player_before_move == 'w' else 'W'
-                                self.try_send_command(f"play {color} {start_move_str}")
-                                self.try_send_command(f"play {color} {end_move_str}")
-                                
-                                self.analysis_results.clear()
-                                if self.analyzing:
-                                    self.try_send_command(GTP_COMMAND_ANALYZE)
+                        self.handle_main_key(event.key)
+                    elif self.mode == "human_ai":
+                        self.handle_human_ai_key(event.key)
                     elif self.mode == "editor":
                         if event.key == pygame.K_1:
                             self.swap_player()
 
+            if self.mode == "human_ai":
+                self.update_human_ai()
+
             if self.mode == "main":
                 self.draw_main_board()
+            elif self.mode == "human_ai":
+                self.draw_human_ai()
             elif self.mode == "editor":
                 self.draw_editor()
 
